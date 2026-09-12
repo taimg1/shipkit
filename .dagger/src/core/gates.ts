@@ -48,6 +48,22 @@ export const dataLoss = (detail: string) =>
       "(expand/contract) — see docs/adr/0005.",
   )
 
+/**
+ * Gate 1d — the migration list and the generated SQL disagree.
+ *
+ * Almost always a stale assembly: `dotnet ef migrations add` does not rebuild, so `--no-build`
+ * generates a script from an assembly that does not contain the new migration. The result is
+ * an empty script that every other gate happily passes.
+ */
+export const emptyScript = (pending: string[]) =>
+  new GateFailure(
+    "empty-script",
+    `${pending.length} migration(s) pending but the generated SQL contains no schema change`,
+    "The compiled assembly is probably stale — build before generating the script. " +
+      "Failing closed: an empty script would pass every downstream gate without inspecting anything.",
+    pending.map((id) => ({ rule: "pending-not-in-script", message: id })),
+  )
+
 /** Gate 2 — no verified backup, no migration. */
 export const backupUnverified = (reason: string) =>
   new GateFailure(

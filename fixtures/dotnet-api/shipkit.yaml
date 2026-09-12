@@ -1,0 +1,17 @@
+# The fixture's own configuration. This is the file a client repo would carry.
+kit: github.com/taimg1/shipkit@v1.0.0
+
+stack: dotnet
+db: postgres
+delivery: kamal
+
+project: src/Api
+migrationsProject: src/Infrastructure
+
+dockerfile: Dockerfile
+registry: ghcr.io/taimg1/shipkit-fixture
+health: /health
+
+environments:
+  prod:
+    url: http://localhost:8080

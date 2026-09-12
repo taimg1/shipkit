@@ -26,9 +26,36 @@ function stripNoise(line: string): string {
   return line.replace(/'(?:''|[^'])*'/g, "''")
 }
 
+/** `dotnet ef migrations script` writes a UTF-8 BOM. Squawk and our scanners must not see it. */
+export function stripBom(text: string): string {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text
+}
+
+/**
+ * True when the script contains no schema change beyond EF's own history-table bookkeeping.
+ *
+ * This matters because two very different situations produce the same near-empty file:
+ * nothing is pending, or the assembly is stale and EF cannot see the new migration.
+ * `dotnet ef migrations add` does NOT rebuild afterwards, so a stale assembly is easy to
+ * produce — and it yields an empty script that Squawk passes. Cross-checking against the
+ * migration list is what turns that silent pass into a failure.
+ */
+export function hasNoSchemaChange(sqlText: string): boolean {
+  const body = stripBom(sqlText)
+    .split("\n")
+    .map((l) => l.replace(/--.*$/, "").trim())
+    .filter((l) => l.length > 0)
+    .join(" ")
+    // EF emits the history table and its own INSERT bookkeeping in every script.
+    .replace(/CREATE TABLE IF NOT EXISTS "__EFMigrationsHistory"[\s\S]*?\);/i, "")
+    .replace(/INSERT INTO "__EFMigrationsHistory"[\s\S]*?;/gi, "")
+
+  return !/\b(CREATE|ALTER|DROP)\b/i.test(body)
+}
+
 export function scanDestructive(sqlText: string): Finding[] {
   const findings: Finding[] = []
-  const lines = sqlText.split("\n")
+  const lines = stripBom(sqlText).split("\n")
 
   // The marker applies to the whole script: a migration that declares intent has been
   // reviewed as a whole. Per-statement markers would be finer, but EF emits statements in

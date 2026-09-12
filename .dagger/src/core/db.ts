@@ -2,8 +2,8 @@ import { dag, Container, Directory, File } from "@dagger.io/dagger"
 import { Config } from "../config.js"
 import { DbAdapter } from "../adapters/types.js"
 import { Finding, withDetail } from "../report.js"
-import { destructiveSql, squawkFailed } from "./gates.js"
-import { parseSquawk, scanDestructive } from "./sql-scan.js"
+import { destructiveSql, emptyScript, squawkFailed } from "./gates.js"
+import { hasNoSchemaChange, parseSquawk, scanDestructive } from "./sql-scan.js"
 import { notImplemented } from "../errors.js"
 
 const SQUAWK_IMAGE = "ghcr.io/sbdchd/squawk:latest"
@@ -50,6 +50,10 @@ export async function dbStage(
 
   const sqlFile = db.pendingSql(src, cfg, from)
   const sqlText = await sqlFile.contents()
+
+  // Before linting anything: the list says there is work, so the script must contain work.
+  // If it does not, the assembly is stale and every gate below would inspect an empty file.
+  if (hasNoSchemaChange(sqlText)) throw emptyScript(pending)
 
   const findings = await lintSql(sqlFile)
   if (findings.length > 0) throw squawkFailed(findings)

@@ -1,0 +1,34 @@
+# Local development only. Production delivery is Kamal (ADR 0006).
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: app
+    ports:
+      - "5432:5432"
+    volumes:
+      # A named volume, never an ephemeral filesystem — losing this is losing the database.
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-dev}
+    environment:
+      ConnectionStrings__Default: "Host=db;Port=5432;Database=app;Username=postgres;Password=postgres"
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

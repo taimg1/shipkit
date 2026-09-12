@@ -3,9 +3,10 @@
 Written 2026-09-12; updated the same day after installing Dagger v0.21.9 and running M0
 against a real engine.
 
-**M0 is verified.** The module loads, its functions are listed, and configuration failures
-behave as designed. Nothing beyond M0 has executed — no stage of `ci` has ever run, because
-there is no fixture project yet (M1).
+**M0 and M1 are verified.** The module loads on a real engine, configuration failures behave
+as designed, and the fixture project builds, tests against a real PostgreSQL, and serves its
+commit SHA from `/health` in a container. No `ci` STAGE has run yet — the Dagger stages
+themselves are M2.
 
 This document exists so that the next session does not mistake "written" for "working".
 
@@ -26,6 +27,15 @@ Actually executed, with output observed:
 | `doctor` catches a missing Dockerfile | → `MISSING (Dockerfile)`, exit 2 |
 | `doctor` rejects an unknown stack | `stack: rails` → *unknown stack "rails"*, `next: Supported: dotnet, nest, next, custom`, exit 2 |
 | `--raw` escape hatch | `shipkit --raw doctor --source=…` passed straight through to `dagger call` |
+| `doctor` against the real fixture | all checks ok, exit 0 |
+| **M1 done #1**: `dotnet test` passes via Testcontainers | 3 tests, real PostgreSQL 17 |
+| **M1 done #2**: compose serves the baked SHA | `GIT_SHA=a1b2c3d4e5f6` → `{"status":"ok","version":"a1b2c3d4e5f6"}` |
+| Container HEALTHCHECK reaches healthy | `docker compose ps` → `Up 25 seconds (healthy)` |
+| No migration at startup | `/orders` → 500 before `database update`, 200 after; `/health` 200 throughout |
+| `-warnaserror` is a real gate | it failed the build on NU1903 in the template's OpenAPI package |
+| `dotnet ef` multi-project form | `--project src/Infrastructure --startup-project src/Api` works, given Design in the startup project |
+| `migrations list` output parsing | the `^\d{14}_` match separates ids from connection warnings and the trailing note |
+| `migrations script <from>` → HEAD | verified; `0` means "from the beginning" |
 | Dagger TS SDK API shape | the decorators, `defaultPath`, `ignore`, and the argument forms all compiled and ran |
 | The `yaml` dependency resolves inside the module | config parsing worked at runtime |
 
@@ -53,9 +63,29 @@ Three guesses were wrong, all of them scaffolding rather than logic:
 
 ### Still unverified
 
+### A second fail-open found, this time by running things
+
+`dotnet ef migrations add` does not rebuild. A later `--no-build` command therefore reads a
+stale assembly, finds no migration, and writes a script containing nothing — and an empty
+script passes Squawk, passes the destructive scan, and passes apply-to-copy. Every gate green,
+nothing inspected.
+
+Worse, a script with nothing pending is byte-identical to that failure: three bytes of UTF-8
+BOM. The file alone cannot tell the two apart.
+
+Fixed in two places: the adapter now builds before generating a script, and `dbStage`
+cross-checks the migration list against the SQL — if migrations are pending but the script
+carries no schema change, that contradiction fails closed (`emptyScript` gate).
+
+Both fail-opens found so far (this one and the string-literal marker) were in the `db` stage.
+That is the stage that decides whether a client keeps their data.
+
+### Still unverified
+
 | Assumption | Where | How to check |
 |---|---|---|
-| `withExec({ expect })`, `asService({ useEntrypoint })` | `core/db.ts`, `core/postgres.ts` | not reached yet — no stage has run |
+| `withExec({ expect })`, `asService({ useEntrypoint })` | `core/db.ts`, `core/postgres.ts` | not reached yet — no Dagger stage has run |
+| That the adapter's containers work at all (restore, lint, test, tooling) | `adapters/dotnet.ts` | M2 — the commands are verified on the host, not yet inside Dagger |
 | Squawk's JSON reporter flag and field names | `core/db.ts`, `core/sql-scan.ts` | M3. Unparseable output already fails closed |
 | **Squawk does not see statements inside `DO $$` blocks** | the reason the non-idempotent script is linted | M3 checkpoint. Until observed, the false-green risk (§7.2) is theoretical, and so is the gate |
 | `dotnet ef migrations script <from> <to>` argument form for "from X to HEAD" | `adapters/dotnet.ts` — the empty-string filter is a placeholder | M3, against the fixture |
@@ -82,6 +112,6 @@ about a minute; afterwards it is cached.
 
 ## Next
 
-M1 — the fixture project. Nothing past M0 can be verified without it: every remaining
-assumption in the table above needs a real .NET project with a real migration to run
-against.
+M2 — `pre`, `build` and `test` as Dagger stages, run against `fixtures/dotnet-api`. Every
+command in those stages has now been verified on the host; M2 is about whether they behave
+the same inside a container, with caching and a service binding.

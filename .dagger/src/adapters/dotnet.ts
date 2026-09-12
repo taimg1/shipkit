@@ -63,33 +63,48 @@ export class DotnetAdapter implements StackAdapter {
 class EfCoreDb implements DbAdapter {
   readonly historyTable = "__EFMigrationsHistory"
 
-  /** SDK container with dotnet-ef available. */
+  /**
+   * SDK container with dotnet-ef available AND a completed build.
+   *
+   * The build is not an optimisation. `dotnet ef migrations add` does not rebuild, so an
+   * assembly can easily lack the migration that was just written; `--no-build` then emits
+   * an empty script and the whole `db` gate inspects nothing. Building here makes
+   * `--no-build` below an honest claim rather than a silent failure mode.
+   */
   private tooling(src: Directory, cfg: Config): Container {
     return new DotnetAdapter()
       .restore(src, cfg)
       .withExec(["dotnet", "tool", "install", "--global", "dotnet-ef", "--version", "10.*"])
       .withEnvVariable("PATH", "/root/.dotnet/tools:$PATH", { expand: true })
+      .withExec(["dotnet", "build", "--no-restore"])
   }
 
   private projectArgs(cfg: Config): string[] {
     // Both projects come from shipkit.yaml — in a multi-project solution the startup and
     // migrations projects differ, and guessing produces a confusing failure deep in EF.
+    //
+    // The STARTUP project must reference Microsoft.EntityFrameworkCore.Design or the tools
+    // refuse to run. This is a requirement on the client project, not something the kit can
+    // supply — see fixtures/dotnet-api for the working arrangement.
     return ["--project", cfg.migrationsProject ?? cfg.project, "--startup-project", cfg.project]
   }
 
   pendingSql(src: Directory, cfg: Config, from: string | null): File {
     // NON-idempotent on purpose: --idempotent wraps statements in DO $$ blocks that Squawk
     // may not analyse (ci-cd-plan.md §7.2). Lint this; apply the bundle.
-    const args = [
-      "dotnet", "ef", "migrations", "script",
-      from ?? "0", // "0" means "from the beginning" in EF
-      "", // empty target = HEAD; replaced below when a range is needed
-      "--output", "/out/migration.sql",
-      "--no-build",
-      ...this.projectArgs(cfg),
-    ].filter((a) => a !== "")
-
-    return this.tooling(src, cfg).withExec(args).file("/out/migration.sql")
+    //
+    // Verified argument form: `script <from>` with no second argument runs from <from> to
+    // HEAD. "0" is EF's name for "from the beginning". A file of only a UTF-8 BOM means
+    // nothing is pending — which is why dbStage cross-checks against the migration list.
+    return this.tooling(src, cfg)
+      .withExec([
+        "dotnet", "ef", "migrations", "script",
+        from ?? "0",
+        "--output", "/out/migration.sql",
+        "--no-build",
+        ...this.projectArgs(cfg),
+      ])
+      .file("/out/migration.sql")
   }
 
   applyArtifact(src: Directory, cfg: Config): Container {
@@ -124,6 +139,9 @@ class EfCoreDb implements DbAdapter {
       .withExec(["dotnet", "ef", "migrations", "list", "--no-build", ...this.projectArgs(cfg)])
       .stdout()
 
+    // `migrations list` also prints connection warnings and a trailing note about pending
+    // status when it cannot reach the database, which is the normal case in CI. Matching the
+    // id format is what separates migrations from that noise.
     const ids = out
       .split("\n")
       .map((l) => l.trim())

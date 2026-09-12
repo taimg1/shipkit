@@ -64,6 +64,7 @@ feeling. Sizes are relative (S/M/L), not dates.
   startup project), `migrationsProject`.
 - **Done when:** `dagger functions` lists `ci` and `deploy`; `dagger call ci --source=.`
   against an empty dir fails with *"shipkit.yaml not found"*, not a stack trace.
+- **DONE 2026-09-12** on Dagger v0.21.9. See `docs/prototype-status.md`.
 
 ### M1 — Fixture project and local baseline · S
 
@@ -75,6 +76,9 @@ feeling. Sizes are relative (S/M/L), not dates.
 - `docker-compose.yml` with app + Postgres on a named volume.
 - **Done when:** `docker compose up` → `curl :8080/health` returns the SHA; `dotnet test`
   passes locally via Testcontainers.
+- **DONE 2026-09-12.** 3 tests green against PostgreSQL 17 via Testcontainers;
+  `GIT_SHA=a1b2c3d4e5f6` → `{"status":"ok","version":"a1b2c3d4e5f6"}`; container reaches
+  `healthy`. Constraints found while building it are recorded in `fixtures/dotnet-api/README.md`.
 
 ### M2 — `ci`: `pre` + `build` + `test` · M
 

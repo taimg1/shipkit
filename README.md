@@ -22,13 +22,22 @@ the pipeline portable to Woodpecker, Gitea Actions or GitLab CI.
   Without `--yes` it prints target, image version, pending migrations and the SQL diff,
   then waits for confirmation.
 
+## Runbooks
+
+`docs/runbooks/` — deploy, rollback, restore, adding a migration, rotating a secret,
+monitoring. Plus records of what the gates actually did when they were driven through their
+failure cases.
+
 ## Status
 
-**M0 done.** The module loads on a real Dagger engine (v0.21.9), `dagger functions` lists
-the pipeline entry points, and configuration failures produce messages and exit codes rather
-than stack traces. No pipeline stage has run yet — that needs the M1 fixture.
-See `docs/prototype-status.md` for exactly what is verified. `docs/v1-plan.md` is the build
-order.
+**Both pipelines run end to end** against a simulated bare server (`dev-server/`), including
+every failure case: a migration that fails, a release that does not take, a rollback, and a
+restore from backup. `docs/prototype-status.md` records exactly what is verified and what is
+still a guess.
+
+Not yet done: an authenticated registry push, and a real server — TLS, a firewall, and
+backups that leave the machine. Both wait on the hosting decision, which is the only thing
+blocking anything.
 
 ## Docs
 

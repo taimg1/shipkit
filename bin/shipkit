@@ -28,6 +28,7 @@ shipkit — CI/CD for turnkey client projects
   shipkit deploy --plan              what would happen; changes nothing
   shipkit deploy --yes=<token>       execute exactly that plan
                                      backup -> migrate -> release -> verify -> rollback -> clean
+  shipkit backup [--out <path>]      a dump proven restorable, written to disk
   shipkit rollback <sha>
   shipkit doctor                     dagger? docker? shipkit.yaml? project?
 
@@ -208,6 +209,17 @@ function translate(cmd, sub, opts) {
     }
     case "rollback":
       return ["rollback", ...src, `--sha=${opts._?.[1] ?? ""}`]
+    case "backup": {
+      const out = opts.out || "prod-backup.pgc"
+      return [
+        "backup",
+        ...src,
+        `--env=${opts.env || "prod"}`,
+        ...credentials(opts),
+        "export",
+        `--path=${out}`,
+      ]
+    }
     case "doctor":
       return ["doctor", ...src]
     default:

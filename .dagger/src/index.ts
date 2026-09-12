@@ -4,7 +4,7 @@
  * Every function returns a JSON report (docs/cli-design.md). The `shipkit` wrapper renders
  * it; `dagger call` prints it raw. Both paths are supported, permanently (ADR 0009).
  */
-import { argument, dag, Container, Directory, Secret, func, object } from "@dagger.io/dagger"
+import { argument, dag, Container, Directory, File, Secret, func, object } from "@dagger.io/dagger"
 import { Config, loadConfig } from "./config.js"
 import { selectAdapter } from "./adapters/index.js"
 import { EXIT, ShipkitError, notImplemented } from "./errors.js"
@@ -401,6 +401,44 @@ export class Shipkit {
       r.skipRemaining(DEPLOY_STAGES)
       return serialize(r.failure(err))
     }
+  }
+
+  /**
+   * A verified backup of production, on demand.
+   *
+   * The same code the deploy runs, exposed on its own — a dump that has been proven
+   * restorable by restoring it, not one that merely exists:
+   *
+   *   shipkit backup --out prod.pgc
+   *
+   * This is what makes a restore drill something a person can actually do. A backup strategy
+   * nobody has restored from is an assumption, and the day it stops being an assumption is
+   * the worst possible day to find out.
+   */
+  @func()
+  async backup(
+    @argument({ defaultPath: ".", ignore: IGNORE }) source: Directory,
+    env = "prod",
+    sshKey?: Secret,
+  ): Promise<File> {
+    const { target } = await resolveTarget(source, env)
+    if (!sshKey) {
+      throw new ShipkitError(
+        EXIT.CONFIG,
+        "backup needs an SSH key for the target",
+        "Pass --ssh-key=file:<path> or set SHIPKIT_SSH_KEY.",
+      )
+    }
+
+    const { result, dump } = await backupProduction(target, sshKey)
+    if (!dump) {
+      throw new ShipkitError(
+        EXIT.GATE,
+        `there is nothing to back up: ${result.status === "empty-database" ? result.reason : "no dump was produced"}`,
+        "Production has no schema yet. There is no dump to take and nothing to lose.",
+      )
+    }
+    return dump
   }
 
   /** Environment and configuration checks, cheapest first. */

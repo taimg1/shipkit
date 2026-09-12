@@ -12,9 +12,15 @@ ci/*.bundle
 # node
 node_modules/
 
-# dotnet
-bin/
-obj/
+# dotnet build output.
+#
+# Scoped to where .NET projects actually live. A bare `bin/` also matches this repository's
+# own bin/, which holds the CLI — and it silently swallowed it for four commits: the kit was
+# published without its entry point and its own workflow would have failed on the first run.
+**/src/**/bin/
+**/src/**/obj/
+**/tests/**/bin/
+**/tests/**/obj/
 
 # secrets
 .env

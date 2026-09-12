@@ -1,0 +1,39 @@
+# Copy to .github/workflows/ci.yml in a client repository.
+#
+# ADR 0001: a checkout and one call, nothing else. The pipeline itself lives in the Dagger
+# module, so moving to Gitea Actions, Woodpecker or GitLab CI means rewriting this file, not
+# the pipeline.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required to publish to GHCR. The default GITHUB_TOKEN carries it; no PAT is needed.
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Dagger
+        run: |
+          curl -fsSL https://dl.dagger.io/dagger/install.sh \
+            | DAGGER_VERSION=v0.21.9 BIN_DIR=/usr/local/bin sh
+
+      - name: shipkit ci
+        env:
+          # Read by the engine from the environment. It is never passed as an argument, so it
+          # cannot appear in a process listing or a log.
+          SHIPKIT_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx --yes github:taimg1/shipkit ci

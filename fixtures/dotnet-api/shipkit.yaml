@@ -1,5 +1,9 @@
-# The fixture's own configuration. This is the file a client repo would carry.
-kit: github.com/taimg1/shipkit@v1.0.0
+# The fixture's own configuration. This is the file a client repo would carry, with one
+# difference: no `kit:` line.
+#
+# A client repo pins a kit version and Dagger fetches that module. The fixture lives inside
+# the kit and must always exercise the module it sits next to — pinning a released version
+# here would mean the kit's own CI tested a previous release instead of the change under test.
 
 stack: dotnet
 db: postgres
@@ -10,6 +14,11 @@ migrationsProject: src/Infrastructure
 
 dockerfile: Dockerfile
 registry: ghcr.io/taimg1/shipkit-fixture
+
+# The fixture exercises the pipeline; it is not a product and must never put an image in
+# anyone's registry. Everything up to `push` still runs, so the stage is exercised as a
+# decision rather than skipped by accident.
+publish: false
 health: /health
 
 environments:

@@ -3,7 +3,7 @@
 Written 2026-09-12; updated the same day after installing Dagger v0.21.9 and running M0
 against a real engine.
 
-**M0 through M3 are verified.** The module loads on a real engine, the fixture builds and
+**M0 through M4 are verified, with one honest gap in M4** (see below). The module loads on a real engine, the fixture builds and
 serves its SHA, `pre`/`build`/`test` run as Dagger stages, and the `db` gate has been driven
 through seven scenarios — index, rename, destructive rewrite, waivers correct and incorrect —
 each with the observed result recorded in `docs/runbooks/m3-db-gate-scenarios.md`.
@@ -53,6 +53,13 @@ Actually executed, with output observed:
 | **M3**: seven `db` gate scenarios | see `docs/runbooks/m3-db-gate-scenarios.md` |
 | **M3**: apply-to-copy against a seeded database | baseline + 3 seed rows + pending, snapshots compared via `information_schema` |
 | `dag.currentModule().source()` | used to ship the default Squawk config |
+| **M4**: branch gating | `--branch=dev` with `defaultBranch: main` → push skipped, run green |
+| **M4**: `publish: false` | push skipped as a decision, with the reason in the report |
+| **M4**: push needs an image | `--stage=push` alone skips rather than publishing a stale image |
+| **M4**: the publish call itself | reached a real registry: `HEAD /v2/shipkit-fixture/blobs/sha256:…`, address and tag correct |
+| **M4**: unauthenticated push fails usefully | GHCR's token endpoint rejected it; exit 3, `next` says no token was provided |
+| **M4**: the token is passed by reference | `--registry-token=env:SHIPKIT_REGISTRY_TOKEN` — the value never becomes an argument |
+| **M4**: module resolution | no `kit:` → local module; `kit:` → `-m <ref>`; `--module` overrides |
 | `withExec({ expect: ReturnType.Any })` | verified on the Squawk step |
 | Dagger TS SDK API shape | the decorators, `defaultPath`, `ignore`, and the argument forms all compiled and ran |
 | The `yaml` dependency resolves inside the module | config parsing worked at runtime |
@@ -149,12 +156,47 @@ EF answered "the migration 'aeab9b5…' was not found" — loudly, thankfully. D
 merge-base commit itself. It now reads the migration files present at that commit and takes
 the newest id, which is argument translation — the wrapper's actual job.
 
+### The CLI had never been committed
+
+The `.gitignore`'s .NET section carried a bare `bin/`, which matches at any depth — including
+this repository's own `bin/`, where the wrapper lives. Four commits went out without the
+kit's entry point. A clone would have had no `shipkit` command, and the kit's own workflow,
+which runs `node ../../bin/shipkit ci`, would have failed on its first run.
+
+Found by noticing that `git status` did not list a file that had certainly changed. The rule
+is now scoped to `**/src/**/bin/` and `**/tests/**/obj/` and the like, and .NET output is
+still ignored.
+
+Worth remembering as a class: the checks in this repository all examine what the pipeline
+*does*. Nothing was watching what it *ships*.
+
+### The M4 gap, stated plainly
+
+**An authenticated push to GHCR has never run.** The `gh` token on this machine has scopes
+`repo, read:org, gist, project, admin:public_key` — no `write:packages` — so there is no
+credential here that could complete one, and obtaining one is not something to do on someone's
+behalf.
+
+What *is* verified is everything up to the credential: the address, the tag, the auth wiring,
+and a real request to GHCR's token endpoint that came back rejected for the right reason. The
+remaining unknown is one `withRegistryAuth` call with a working token.
+
+It verifies itself on the first merge to `main` in a client repo: the workflow passes
+`secrets.GITHUB_TOKEN`, which carries `packages: write` by default, so no PAT is needed.
+A local check, if wanted sooner, needs a PAT with `write:packages` in
+`SHIPKIT_REGISTRY_TOKEN` and `publish: true`.
+
+A local HTTP registry was tried first and refused — Dagger speaks HTTPS to registries, and
+the SDK's `registryService` publish option exists but adding it to production code purely to
+make a test possible is test scaffolding in the wrong place.
+
 ### Still unverified
 
 | Assumption | Where | How to check |
 |---|---|---|
+| An authenticated registry push | `core/push.ts` | first merge to main, or a PAT |
+| A client repo consuming the kit as a remote module (`-m github.com/…`) — the repo is private, so Dagger needs git auth | `bin/shipkit` | M7, with `shipkit init` |
 | `applyArtifact` / migration bundles — never built or run | `adapters/dotnet.ts` | M6 |
-| `push` to GHCR | `index.ts` | M4 |
 | Everything in `core/deploy.ts` | — | M6 |
 
 ### Known limitation, recorded deliberately
@@ -189,7 +231,6 @@ about a minute; afterwards it is cached.
 
 ## Next
 
-M4 — `push` to GHCR and the thin GitHub Actions workflow. Small, and the last piece of `ci`.
-
-After that M5 (server preparation) is the only thing blocking M6, and M5 needs the hosting
-decision that is still open.
+`ci` is complete. M5 — server preparation — is the only thing standing between here and a
+working deploy, and it cannot start until the hosting target is chosen. Nothing else in the
+plan is blocked on anything but that decision.

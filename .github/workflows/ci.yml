@@ -1,0 +1,36 @@
+# The kit's own CI: run the pipeline against the fixture on every push.
+#
+# ADR 0001: this file is a checkout and one call. Everything it could be tempted to do —
+# caching, matrix, conditionals, deciding what publishes — belongs in the Dagger module,
+# where it also runs on a laptop.
+name: ci
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The full history is needed to resolve the migration diff base against main.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Dagger
+        run: |
+          curl -fsSL https://dl.dagger.io/dagger/install.sh \
+            | DAGGER_VERSION=v0.21.9 BIN_DIR=/usr/local/bin sh
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Pipeline against the fixture
+        working-directory: fixtures/dotnet-api
+        run: node ../../bin/shipkit ci

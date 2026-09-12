@@ -19,6 +19,13 @@ export interface Config {
   migrationsProject?: string
   dockerfile: string
   registry: string
+  /** Merges to this branch are what may be published. */
+  defaultBranch: string
+  /**
+   * Whether this project publishes an image at all. False for test fixtures, libraries, and
+   * anything deployed from somewhere other than a registry.
+   */
+  publish: boolean
   /** Deploy targets by name; `prod` must exist for `deploy`. */
   environments: Record<string, { url: string }>
 }
@@ -88,6 +95,8 @@ export async function loadConfig(source: Directory): Promise<Config> {
     migrationsProject: c.migrationsProject as string | undefined,
     dockerfile: (c.dockerfile as string) ?? "Dockerfile",
     registry: (c.registry as string) ?? "",
+    defaultBranch: (c.defaultBranch as string) ?? "main",
+    publish: c.publish === undefined ? true : c.publish === true,
     environments,
   }
 }

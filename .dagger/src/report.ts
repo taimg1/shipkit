@@ -95,15 +95,25 @@ export class ReportBuilder {
     private readonly sha: string,
   ) {}
 
-  /** Runs `fn` as a named stage, timing it and recording success or failure. */
-  async stage<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  /**
+   * Runs `fn` as a named stage, timing it and recording success or failure.
+   *
+   * A stage may return `withDetail(value, detail)` to put extra fields on its report entry;
+   * the caller still receives the plain value, because what the report shows and what the
+   * next stage needs are different things.
+   */
+  async stage<T>(name: string, fn: () => Promise<T | StageDetail<T>>): Promise<T> {
     const t0 = Date.now()
     try {
       const result = await fn()
       const entry: Stage = { name, status: "ok", seconds: secondsSince(t0) }
-      if (isStageDetail(result)) Object.assign(entry, result.detail)
+      if (isStageDetail(result)) {
+        Object.assign(entry, result.detail)
+        this.stages.push(entry)
+        return result.value as T
+      }
       this.stages.push(entry)
-      return result
+      return result as T
     } catch (err) {
       const entry: Stage = { name, status: "failed", seconds: secondsSince(t0) }
       if (err instanceof ShipkitError) {

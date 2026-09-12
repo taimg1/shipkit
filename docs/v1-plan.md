@@ -139,6 +139,13 @@ feeling. Sizes are relative (S/M/L), not dates.
 - **Done when:** a PR on the real project runs `ci`; a merge to `main` produces an image in
   GHCR whose `/health` reports the merged SHA. GitHub free minutes are enough for now; a
   self-hosted runner is a later, separate change.
+- **DONE 2026-09-12 except the authenticated push.** Branch gating, `publish: false`, the
+  refusal to push without a freshly built image, the token passed by reference, and module
+  resolution are all verified. The publish call reached GHCR and was rejected for missing
+  credentials — no token on this machine carries `write:packages`. It completes on the first
+  merge to `main`, where `secrets.GITHUB_TOKEN` supplies the scope.
+- Added while building it: `publish: false` in `shipkit.yaml`, so a fixture or a library
+  declines to publish as a decision rather than by an accident of configuration.
 
 ### M5 — Server preparation · M · *blocked on hosting decision*
 

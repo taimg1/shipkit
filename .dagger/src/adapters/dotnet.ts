@@ -12,6 +12,17 @@ const SDK_IMAGE = "mcr.microsoft.com/dotnet/sdk:10.0"
 const SRC = "/src"
 
 /**
+ * Makes `dotnet ef` available whatever the project's tooling arrangement is.
+ * Restoring a manifest that does not list dotnet-ef leaves the command missing, so the
+ * fallback is guarded by an actual invocation rather than by the manifest's presence.
+ */
+const EF_TOOLING_SCRIPT = [
+  "set -e",
+  'if [ -f dotnet-tools.json ] || [ -f .config/dotnet-tools.json ]; then dotnet tool restore; fi',
+  'if ! dotnet ef --version >/dev/null 2>&1; then dotnet tool install --global dotnet-ef --version "10.*"; fi',
+].join("\n")
+
+/**
  * .NET + EF Core. The only adapter in v1.
  *
  * Constraint from docs/multi-stack-plan.md §8: no `dotnet` command may appear outside this
@@ -73,18 +84,22 @@ class EfCoreDb implements DbAdapter {
   readonly historyTable = "__EFMigrationsHistory"
 
   /**
-   * SDK container with dotnet-ef available AND a completed build.
+   * SDK container with `dotnet ef` available AND a completed build.
+   *
+   * Two arrangements exist in the wild and the kit must accept both: a repo with a local
+   * tool manifest, and a repo with none. A manifest shadows a global install — `dotnet ef`
+   * then refuses with "Run dotnet tool restore" rather than falling back — so the manifest
+   * has to be restored first, and a global install is only the fallback.
    *
    * The build is not an optimisation. `dotnet ef migrations add` does not rebuild, so an
-   * assembly can easily lack the migration that was just written; `--no-build` then emits
-   * an empty script and the whole `db` gate inspects nothing. Building here makes
-   * `--no-build` below an honest claim rather than a silent failure mode.
+   * assembly can easily lack the migration that was just written; `--no-build` below would
+   * then emit an empty script and the whole `db` gate would inspect nothing.
    */
   private tooling(src: Directory, cfg: Config): Container {
     return new DotnetAdapter()
       .restore(src, cfg)
-      .withExec(["dotnet", "tool", "install", "--global", "dotnet-ef", "--version", "10.*"])
       .withEnvVariable("PATH", "/root/.dotnet/tools:$PATH", { expand: true })
+      .withExec(["sh", "-c", EF_TOOLING_SCRIPT])
       .withExec(["dotnet", "build", "--no-restore"])
   }
 
@@ -98,17 +113,16 @@ class EfCoreDb implements DbAdapter {
     return ["--project", cfg.migrationsProject ?? cfg.project, "--startup-project", cfg.project]
   }
 
-  pendingSql(src: Directory, cfg: Config, from: string | null): File {
-    // NON-idempotent on purpose: --idempotent wraps statements in DO $$ blocks that Squawk
-    // may not analyse (ci-cd-plan.md §7.2). Lint this; apply the bundle.
-    //
-    // Verified argument form: `script <from>` with no second argument runs from <from> to
-    // HEAD. "0" is EF's name for "from the beginning". A file of only a UTF-8 BOM means
-    // nothing is pending — which is why dbStage cross-checks against the migration list.
+  sqlBetween(src: Directory, cfg: Config, from: string | null, to: string | null): File {
+    // Verified argument form: `script <from> [<to>]`. "0" is EF's name for the beginning,
+    // and omitting <to> means the current head. A file containing only a UTF-8 BOM means the
+    // range is empty — which is why dbStage cross-checks against the migration list.
+    const range = to ? [from ?? "0", to] : [from ?? "0"]
+
     return this.tooling(src, cfg)
       .withExec([
         "dotnet", "ef", "migrations", "script",
-        from ?? "0",
+        ...range,
         "--output", "/out/migration.sql",
         "--no-build",
         ...this.projectArgs(cfg),

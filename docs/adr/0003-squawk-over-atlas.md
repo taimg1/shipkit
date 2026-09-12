@@ -27,7 +27,16 @@ per-project licence costs multiply.
 
 ## Consequences
 
-- Squawk parses SQL, so it must be pointed at the **non-idempotent** script. The
-  `--idempotent` form wraps statements in `DO $$ ... $$` PL/pgSQL blocks that Squawk may not
-  analyse, producing a false green. See [0005](0005-migrations-never-at-startup.md).
+- Squawk parses SQL, so it must be pointed at the **non-idempotent** script. **Measured
+  2026-09-12** on one migration dropping a populated column: the non-idempotent script
+  produced 3 findings including `ban-drop-column`; the `--idempotent` form of the same
+  migration, with statements wrapped in `DO $EF$ ... END $EF$`, produced **zero**. Squawk does
+  not look inside `DO` blocks, so linting the idempotent script would report a clean bill of
+  health for a migration that destroys data. See `docs/runbooks/m3-db-gate-scenarios.md` and
+  [0005](0005-migrations-never-at-startup.md).
+- The rule set is configured in `.dagger/squawk.default.toml`, which a client repo overrides
+  with its own `.squawk.toml`. Every exclusion is written down with its reason: a gate that is
+  red on every migration gets waived, and a waived gate is not a gate. `require-lock-timeout`
+  and `require-statement-timeout` are excluded only because EF sets neither — the protection
+  moves to the connection in the `migrate` stage (M6).
 - Squawk's rule set is PostgreSQL-specific. Another database would need this ADR revisited.

@@ -3,9 +3,14 @@
 Written 2026-09-12; updated the same day after installing Dagger v0.21.9 and running M0
 against a real engine.
 
-**M0, M1 and M2 are verified.** The module loads on a real engine, the fixture builds and
-serves its SHA, and `pre`, `build` and `test` now run as Dagger stages — green on the fixture,
-red on deliberate breakage, with the right exit code either way. `db` is next (M3).
+**M0 through M3 are verified.** The module loads on a real engine, the fixture builds and
+serves its SHA, `pre`/`build`/`test` run as Dagger stages, and the `db` gate has been driven
+through seven scenarios — index, rename, destructive rewrite, waivers correct and incorrect —
+each with the observed result recorded in `docs/runbooks/m3-db-gate-scenarios.md`.
+
+The assumption the whole linting gate rested on has now been measured, and it held: Squawk
+reports **nothing at all** for a column-dropping migration when that migration is wrapped in
+`DO $EF$` blocks. Linting the non-idempotent script is not a preference.
 
 This document exists so that the next session does not mistake "written" for "working".
 
@@ -42,6 +47,13 @@ Actually executed, with output observed:
 | The Postgres service binding works | tests reported 3/3, which they could not have done without a database |
 | `source.dockerBuild({ dockerfile, buildArgs })` | verified |
 | The wrapper renders a real run end to end | stage table, tag, test counts, failing command, reason |
+| **M3**: Squawk's image, flag, fields | npm `squawk-cli@2.65.0`; `--reporter json`; fields `rule_name`, `file`, `line`, `level`, `message`, `help` |
+| **M3**: `line` is zero-based | a finding on the first line arrives as 0; the parser now adds 1 |
+| **M3**: the `DO $$` false green | same migration: 3 findings plain, **0** idempotent |
+| **M3**: seven `db` gate scenarios | see `docs/runbooks/m3-db-gate-scenarios.md` |
+| **M3**: apply-to-copy against a seeded database | baseline + 3 seed rows + pending, snapshots compared via `information_schema` |
+| `dag.currentModule().source()` | used to ship the default Squawk config |
+| `withExec({ expect: ReturnType.Any })` | verified on the Squawk step |
 | Dagger TS SDK API shape | the decorators, `defaultPath`, `ignore`, and the argument forms all compiled and ran |
 | The `yaml` dependency resolves inside the module | config parsing worked at runtime |
 
@@ -66,6 +78,14 @@ Three guesses were wrong, all of them scaffolding rather than logic:
 
 `dagger develop` rewrites `.dagger/package.json` and `.dagger/tsconfig.json` and generates
 `.gitignore`, `.gitattributes` and `yarn.lock`. Do not hand-maintain those four files.
+
+### And one in the wrapper
+
+`shipkit ci` was passing a **git SHA** to `--migration-base`, which expects a **migration id**.
+EF answered "the migration 'aeab9b5…' was not found" — loudly, thankfully. Decision D4 says
+"last migration id present on main, from `git merge-base`", and the wrapper had taken the
+merge-base commit itself. It now reads the migration files present at that commit and takes
+the newest id, which is argument translation — the wrapper's actual job.
 
 ### Still unverified
 
@@ -103,14 +123,46 @@ meaningless.
 A third, smaller one: `dotnet test` exiting 0 having discovered nothing would have been a
 pass. The adapter now parses the runner's summary and the core fails on zero tests.
 
+### A third fail-open, and a design the marker forced open
+
+The published Squawk image has no `linux/arm64` manifest: it would have worked on CI and
+failed on every Apple Silicon laptop. Squawk now comes from npm, which ships native binaries
+for both, pinned to an exact version — a linter that silently gains or loses a rule changes
+what the gate means.
+
+The bigger correction was to the intent marker. It began as `shipkit:destructive-ok`, a
+blanket "this migration is fine", which had two faults: a waiver obtained for one column let
+an unrelated second loss ride along inside the same migration, and it could not waive Squawk
+at all — so an intentional, reviewed drop could never ship, and the realistic outcome was
+someone deleting `ban-drop-column` from the config for every migration forever.
+
+It is now `shipkit:allow-loss <target>`: it must name what is being destroyed, it applies
+uniformly to Squawk, the grep scan and apply-to-copy, it is matched per statement rather than
+per file, and a marker that waives nothing is itself a failure (the stale-allowance gate),
+so markers cannot be added preemptively.
+
+### And one in the wrapper
+
+`shipkit ci` was passing a **git SHA** to `--migration-base`, which expects a **migration id**.
+EF answered "the migration 'aeab9b5…' was not found" — loudly, thankfully. Decision D4 says
+"last migration id present on main, from `git merge-base`", and the wrapper had taken the
+merge-base commit itself. It now reads the migration files present at that commit and takes
+the newest id, which is argument translation — the wrapper's actual job.
+
 ### Still unverified
 
 | Assumption | Where | How to check |
 |---|---|---|
-| `withExec({ expect })` | `core/db.ts` (Squawk) | M3 |
-| Squawk's image, JSON reporter flag, and field names | `core/db.ts` | M3 |
-| **Squawk does not see statements inside `DO $$`** | the whole reason we lint the non-idempotent script | M3 — still theoretical |
-| `applyArtifact` / migration bundles | `adapters/dotnet.ts` | M6 |
+| `applyArtifact` / migration bundles — never built or run | `adapters/dotnet.ts` | M6 |
+| `push` to GHCR | `index.ts` | M4 |
+| Everything in `core/deploy.ts` | — | M6 |
+
+### Known limitation, recorded deliberately
+
+`allow-loss` can waive the destruction of a column that still holds data — scenario E does
+exactly that, on a column with three rows behind it. The protections are that the author must
+name the column, the marker is visible in review, and the run prints what it permitted along
+with the row count. What the gate cannot do is tell a reviewed decision from a careless one.
 | Squawk's JSON reporter flag and field names | `core/db.ts`, `core/sql-scan.ts` | M3. Unparseable output already fails closed |
 | **Squawk does not see statements inside `DO $$` blocks** | the reason the non-idempotent script is linted | M3 checkpoint. Until observed, the false-green risk (§7.2) is theoretical, and so is the gate |
 | `dotnet ef migrations script <from> <to>` argument form for "from X to HEAD" | `adapters/dotnet.ts` — the empty-string filter is a placeholder | M3, against the fixture |
@@ -137,11 +189,7 @@ about a minute; afterwards it is cached.
 
 ## Next
 
-M3 — the `db` stage. It already fails on something real: the fixture carries a local tool
-manifest (`dotnet-tools.json`), which shadows the adapter's global `dotnet-ef` install and
-makes EF demand `dotnet tool restore`. The adapter has to handle both arrangements, because
-client projects will have both.
+M4 — `push` to GHCR and the thin GitHub Actions workflow. Small, and the last piece of `ci`.
 
-M3 also holds the checkpoint that the entire linting gate rests on: whether Squawk really
-does miss statements wrapped in `DO $$` blocks. Until that is observed, the reason for
-linting the non-idempotent script is an assumption.
+After that M5 (server preparation) is the only thing blocking M6, and M5 needs the hosting
+decision that is still open.

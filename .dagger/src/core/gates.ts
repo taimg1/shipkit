@@ -86,6 +86,22 @@ export const emptyScript = (pending: string[]) =>
     pending.map((id) => ({ rule: "pending-not-in-script", message: id })),
   )
 
+/**
+ * Gate 1e — an allow-loss marker that waives nothing.
+ *
+ * Without this, markers can be added preemptively — "just in case CI complains" — and a
+ * migration accumulates blanket permission to destroy things it does not yet destroy. A
+ * waiver has to correspond to an actual, observed loss or it is not a waiver, it is a hole.
+ */
+export const staleAllowance = (targets: string[]) =>
+  new GateFailure(
+    "stale-allowance",
+    `allow-loss marker(s) for ${targets.join(", ")} but nothing of that name was lost`,
+    "Remove the marker. A waiver must name something the migration actually destroys, " +
+      "otherwise it is standing permission for a future loss nobody reviewed.",
+    targets.map((t) => ({ rule: "stale-allow-loss", message: t })),
+  )
+
 /** Gate 2 — no verified backup, no migration. */
 export const backupUnverified = (reason: string) =>
   new GateFailure(

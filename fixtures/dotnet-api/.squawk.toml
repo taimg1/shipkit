@@ -1,0 +1,47 @@
+# The fixture's own Squawk configuration — a copy of the kit's default, which is what a
+# client repo gets from `shipkit init`.
+#
+# What is excluded, and why. Every exclusion here is a rule that fires on migrations EF Core
+# generates normally, for tables that are new or small. A gate that is red on every single
+# migration gets waived, and a waived gate is not a gate — so the noise is removed here,
+# deliberately and in writing, rather than in an argument at merge time.
+
+excluded_rules = [
+  # Wants IF NOT EXISTS / IF EXISTS on every statement. EF already guarantees a migration
+  # runs at most once via __EFMigrationsHistory, and this rule fires on literally every
+  # statement, burying the findings that matter.
+  "prefer-robust-stmts",
+
+  # varchar length comes from the model's MaxLength. On a new table it costs nothing, and
+  # this rule cannot tell a CREATE from an ALTER of a populated column.
+  "prefer-text-field",
+
+  # A scale opinion. int identity is correct for the table sizes these projects have.
+  "prefer-bigint-over-int",
+
+  # EF Core emits `timestamp with time zone` for DateTimeOffset already.
+  "prefer-timestamptz",
+
+  # EF Core 10 already generates identity columns rather than serial.
+  "prefer-identity",
+
+  # These two are real protections and are excluded reluctantly: EF does not set either
+  # timeout, so they fire on every migration ever generated. The protection belongs at the
+  # connection instead — the `migrate` stage sets lock_timeout and statement_timeout when it
+  # applies the bundle (M6). Revisit this exclusion then.
+  "require-lock-timeout",
+  "require-statement-timeout",
+]
+
+# Everything not listed above stays on. In particular these, each matching a hazard recorded
+# in docs/ci-cd-plan.md §7:
+#
+#   require-concurrent-index-creation  §7.4  a plain CREATE INDEX blocks writes
+#   ban-drop-column                    §7.3  the EF rename trap loses the column's data
+#   ban-drop-table                     §7.3  data loss
+#   changing-column-type               §7.5  ALTER TYPE rewrites the table under a lock
+#   adding-required-field              §7.5  SET NOT NULL needs a full scan under a lock
+#   adding-foreign-key-constraint      §7.5  locks both tables without NOT VALID
+#   constraint-missing-not-valid       §7.5  same
+#   disallowed-unique-constraint       §7.5  builds an index under an exclusive lock
+#   renaming-column                    §7.6  breaks the old version during a zero-downtime swap

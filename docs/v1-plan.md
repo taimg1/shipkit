@@ -117,6 +117,16 @@ feeling. Sizes are relative (S/M/L), not dates.
   `CONCURRENTLY` + `suppressTransaction` → green; a property rename → red (grep gate); the
   same rename with the D6 marker → red at apply-to-copy because the seed rows lost a column;
   a rename done properly as `RenameColumn` → green.
+- **DONE 2026-09-12**, with two corrections to the plan itself, both recorded in
+  `docs/runbooks/m3-db-gate-scenarios.md`:
+  - A correct `RenameColumn` is **red**, not green. During a zero-downtime swap both
+    application versions run at once, so a rename in a single release is a break — the gate
+    is right and the expectation above was wrong.
+  - D6 became `shipkit:allow-loss <target>` and applies to every destructive gate, so a
+    correctly marked drop is **green** with the loss printed. A blanket marker that waived
+    only the grep could never have shipped an intentional drop.
+  - The checkpoint held: the same destructive migration yields 3 Squawk findings plain and
+    **0** when wrapped in `DO $EF$`.
 
 ### M4 — `push` + thin trigger · S
 

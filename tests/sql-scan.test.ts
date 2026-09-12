@@ -1,6 +1,12 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { scanDestructive, parseSquawk, hasNoSchemaChange } from "../.dagger/src/core/sql-scan.ts"
+import {
+  scanDestructive,
+  parseSquawk,
+  hasNoSchemaChange,
+  parseAllowedLosses,
+  applyAllowances,
+} from "../.dagger/src/core/sql-scan.ts"
 
 // The EF rename trap: this is exactly what EF emits when a property is renamed.
 const RENAME_AS_DROP_ADD = `
@@ -23,13 +29,30 @@ test("a proper RENAME COLUMN passes", () => {
   assert.deepEqual(scanDestructive(PROPER_RENAME), [])
 })
 
-test("an intent marker anywhere in the script suppresses the gate (D6)", () => {
-  const sql = `-- shipkit:destructive-ok column was never populated in production\n${RENAME_AS_DROP_ADD}`
+test("an allow-loss marker naming the column waives that statement (D6)", () => {
+  const sql = `-- shipkit:allow-loss orders.CreatedAt  never populated in production\n${RENAME_AS_DROP_ADD}`
   assert.deepEqual(scanDestructive(sql), [])
 })
 
+test("a marker for one column does not excuse dropping another", () => {
+  // The reason the marker names a target: a waiver obtained for one change must not let a
+  // second, unintended destruction ride along inside the same migration.
+  const sql = `-- shipkit:allow-loss orders.CreatedAt  reviewed
+ALTER TABLE orders DROP COLUMN "CreatedAt";
+ALTER TABLE orders DROP COLUMN "Reference";`
+  const f = scanDestructive(sql)
+  assert.equal(f.length, 1)
+  assert.match(f[0].sql!, /Reference/)
+})
+
+test("parseAllowedLosses reads the targets and strips quotes", () => {
+  const sql = `-- shipkit:allow-loss "orders"."CreatedAt"  reviewed
+-- shipkit:allow-loss legacy_orders  table is unused`
+  assert.deepEqual(parseAllowedLosses(sql), ["orders.CreatedAt", "legacy_orders"])
+})
+
 test("a marker inside a string literal does not suppress the gate", () => {
-  const sql = `INSERT INTO notes (body) VALUES ('-- shipkit:destructive-ok nice try');\nALTER TABLE orders DROP COLUMN "CreatedAt";`
+  const sql = `INSERT INTO notes (body) VALUES ('-- shipkit:allow-loss orders.CreatedAt nice try');\nALTER TABLE orders DROP COLUMN "CreatedAt";`
   const f = scanDestructive(sql)
   assert.equal(f.length, 1, "the literal must not be read as a marker")
   assert.equal(f[0].rule, "drop-column")
@@ -58,12 +81,26 @@ test("empty Squawk output is a pass", () => {
   assert.deepEqual(parseSquawk("   "), [])
 })
 
-test("parses Squawk findings", () => {
+test("parses Squawk findings and converts its zero-based line", () => {
+  // Verified against squawk-cli 2.65.0: `line` is zero-based, so a finding on the first
+  // line of the file arrives as 0. Reporting it unchanged points the reader one line early.
   const f = parseSquawk(JSON.stringify([
-    { rule_name: "require-concurrent-index-creation", file: "migration.sql", line: 14, message: "use CONCURRENTLY" },
+    {
+      rule_name: "require-concurrent-index-creation",
+      file: "migration.sql",
+      line: 13,
+      message: "Concurrent index creation is preferred",
+      help: "Use CREATE INDEX CONCURRENTLY",
+    },
   ]))
   assert.equal(f[0].rule, "require-concurrent-index-creation")
-  assert.equal(f[0].line, 14)
+  assert.equal(f[0].line, 14, "zero-based 13 is line 14")
+  assert.match(f[0].message!, /Concurrent index creation is preferred — Use CREATE INDEX CONCURRENTLY/)
+})
+
+test("a finding on the very first line is reported as line 1, not line 0", () => {
+  const f = parseSquawk(JSON.stringify([{ rule_name: "ban-drop-column", line: 0 }]))
+  assert.equal(f[0].line, 1)
 })
 
 // --- Real output captured from fixtures/dotnet-api on 2026-09-12 -------------------------
@@ -128,4 +165,31 @@ test("the BOM does not hide a destructive statement on the first line", () => {
 
 test("the real initial migration is not destructive", () => {
   assert.deepEqual(scanDestructive(REAL_INITIAL_SCRIPT), [])
+})
+
+test("an allow-loss marker waives the matching Squawk finding", () => {
+  const sql = `-- shipkit:allow-loss orders.CreatedAt  reviewed
+ALTER TABLE orders DROP COLUMN "CreatedAt";`
+  const findings = [{ rule: "ban-drop-column", line: 2 }]
+  assert.deepEqual(applyAllowances(findings, sql, ["orders.CreatedAt"]), [])
+})
+
+test("a marker does not waive a Squawk finding on a different line", () => {
+  const sql = `-- shipkit:allow-loss orders.CreatedAt  reviewed
+ALTER TABLE orders DROP COLUMN "CreatedAt";
+ALTER TABLE orders DROP COLUMN "Reference";`
+  const findings = [
+    { rule: "ban-drop-column", line: 2 },
+    { rule: "ban-drop-column", line: 3 },
+  ]
+  const left = applyAllowances(findings, sql, ["orders.CreatedAt"])
+  assert.equal(left.length, 1)
+  assert.equal(left[0].line, 3)
+})
+
+test("a marker never waives a non-destructive rule", () => {
+  const sql = `-- shipkit:allow-loss orders.CreatedAt  reviewed
+CREATE INDEX ix ON orders ("CreatedAt");`
+  const findings = [{ rule: "require-concurrent-index-creation", line: 2 }]
+  assert.equal(applyAllowances(findings, sql, ["orders.CreatedAt"]).length, 1)
 })

@@ -53,11 +53,16 @@ export interface DbAdapter {
   lastApplied(dsn: string, cfg: Config, src: Directory): Promise<string | null>
 
   /**
-   * Plain, NON-idempotent SQL for everything after `from`. This is what Squawk lints;
-   * it must not be wrapped in DO $$ blocks, which Squawk may not analyse — the false-green
-   * risk in ci-cd-plan.md §7.2.
+   * Plain, NON-idempotent SQL for the migrations in `(from, to]`. `null` means the very
+   * beginning and the current head respectively.
+   *
+   * NON-idempotent matters: `--idempotent` wraps statements in DO $$ blocks that Squawk may
+   * not analyse, which would produce a false green (ci-cd-plan.md §7.2).
+   *
+   * It is a range rather than just "what is pending" because apply-to-copy needs to rebuild
+   * the schema as production has it before applying anything on top.
    */
-  pendingSql(src: Directory, cfg: Config, from: string | null): File
+  sqlBetween(src: Directory, cfg: Config, from: string | null, to: string | null): File
 
   /** The artifact that actually applies migrations in production. */
   applyArtifact(src: Directory, cfg: Config): Container

@@ -139,9 +139,11 @@ export async function backup(
 async function productionTableCount(env: Environment, key: Secret): Promise<number> {
   const query =
     "select count(*) from information_schema.tables where table_schema='public'"
+  // stdin and a quoted heredoc, for the same reason as in history.ts: nothing in the query
+  // then has to survive a shell.
   const script =
-    `docker exec ${env.dbContainer} psql -U ${env.dbUser} -d ${env.database} ` +
-    `-tAc "${query}"`
+    `docker exec -i ${env.dbContainer} psql -U ${env.dbUser} -d ${env.database} -tA ` +
+    `<<'SHIPKIT_SQL'\n${query}\nSHIPKIT_SQL\n`
 
   const out = await sshContainer(env, key)
     .withExec(["sh", "-c", remoteScript(env, script)])

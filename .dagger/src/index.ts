@@ -15,10 +15,34 @@ import { push as pushImage } from "./core/push.js"
 import { backup as backupProduction, BackupResult } from "./core/backup.js"
 import { migrate as runMigrations } from "./core/migrate.js"
 import { lastApplied } from "./core/history.js"
+import {
+  clean as cleanServer,
+  currentVersion,
+  release as releaseImage,
+  rollback as rollbackTo,
+} from "./core/release.js"
+import { verify as verifyHealth } from "./core/verify.js"
+import { buildPlan, renderPlan } from "./core/plan.js"
+import { StackAdapter } from "./adapters/types.js"
+
+/** Config, adapter and environment, resolved once and validated together. */
+async function resolveTarget(source: Directory, env: string) {
+  const cfg = await loadConfig(source)
+  const adapter = selectAdapter(cfg)
+  const target = cfg.environments[env]
+  if (!target) {
+    throw new ShipkitError(
+      EXIT.CONFIG,
+      `environment "${env}" is not defined in shipkit.yaml`,
+      `Defined: ${Object.keys(cfg.environments).join(", ") || "none"}.`,
+    )
+  }
+  return { cfg, adapter: adapter as StackAdapter, target }
+}
 import { noTestsRan, testsFailed } from "./core/gates.js"
-import { digest, planToken, renderPlan, DeployPlan } from "./core/plan.js"
 
 const CI_STAGES = ["pre", "build", "test", "db", "push"]
+const DEPLOY_STAGES = ["backup", "migrate", "release", "verify", "rollback", "clean"]
 
 /**
  * One definition of "the image", used by `ci` and by `image` alike, so that what gets
@@ -204,40 +228,35 @@ export class Shipkit {
 
   /**
    * Prints what a deploy would do and exits 0 without touching anything.
-   * The plan carries a token; `deploy` requires that exact token (ADR 0009).
+   *
+   * The plan carries a token — a hash of what was displayed. `deploy` requires that exact
+   * token, so an agent physically cannot deploy something it has not shown, and a plan that
+   * has gone stale (a new commit, production moved, another migration merged) stops matching
+   * rather than being quietly executed (ADR 0009).
    */
   @func()
   async deployPlan(
     @argument({ defaultPath: ".", ignore: IGNORE }) source: Directory,
     env = "prod",
     sha = "dev",
+    sshKey?: Secret,
+    registryToken?: Secret,
   ): Promise<string> {
     const r = new ReportBuilder("deploy --plan", sha)
     try {
-      const cfg = await loadConfig(source)
-      const target = cfg.environments[env]
-      if (!target) {
+      const { cfg, adapter, target } = await resolveTarget(source, env)
+      if (!sshKey) {
         throw new ShipkitError(
           EXIT.CONFIG,
-          `environment "${env}" is not defined in shipkit.yaml`,
-          `Defined: ${Object.keys(cfg.environments).join(", ") || "none"}.`,
+          "reading production state needs an SSH key",
+          "Pass --ssh-key=file:<path> or set SHIPKIT_SSH_KEY.",
         )
       }
 
-      // M6 fills these from production: current image tag, last applied migration (D5),
-      // the pending SQL, and the last verified backup timestamp.
-      throw notImplemented("reading production state for the plan", "M6")
-
-      // Shape kept here so M6 is assembly, not design:
-      // const base: Omit<DeployPlan, "token"> = {
-      //   env, url: target.url, imageTag: `sha-${sha.slice(0, 7)}`,
-      //   currentImageTag, migrations, sqlDigest: digest(sqlText),
-      //   sqlPreview: `${sqlText.split("\n").length} lines`,
-      //   destructive: false, lastVerifiedBackup,
-      // }
-      // const plan: DeployPlan = { ...base, token: planToken(base) }
-      // r.set("plan", plan); r.set("rendered", renderPlan(plan))
-      // return serialize(r.success())
+      const plan = await buildPlan(source, cfg, env, target, adapter, sha, sshKey, cfg.health, registryToken)
+      r.set("plan", plan)
+      r.set("rendered", renderPlan(plan))
+      return serialize(r.success())
     } catch (err) {
       return serialize(r.failure(err))
     }
@@ -249,8 +268,8 @@ export class Shipkit {
    * Stage order and the gates between them are fixed by ADR 0004:
    *   backup -> migrate -> release -> verify -> rollback -> clean
    *
-   * `--stage` runs one stage on its own, for building and debugging the pipeline. Stages
-   * that change production still require a plan token; read-only ones do not.
+   * Every gate fails closed. `--stage` runs one stage for building and debugging the
+   * pipeline; stages that change production still need a plan token, read-only ones do not.
    */
   @func()
   async deploy(
@@ -261,19 +280,14 @@ export class Shipkit {
     stage?: string,
     sshKey?: Secret,
     dbUrl?: Secret,
+    registryToken?: Secret,
   ): Promise<string> {
     const r = new ReportBuilder("deploy", sha)
+    const tag = `sha-${sha.slice(0, 7)}`
+    let previousVersion: string | null = null
+
     try {
-      const cfg = await loadConfig(source)
-      const adapter = selectAdapter(cfg)
-      const target = cfg.environments[env]
-      if (!target) {
-        throw new ShipkitError(
-          EXIT.CONFIG,
-          `environment "${env}" is not defined in shipkit.yaml`,
-          `Defined: ${Object.keys(cfg.environments).join(", ") || "none"}.`,
-        )
-      }
+      const { cfg, adapter, target } = await resolveTarget(source, env)
       if (!sshKey) {
         throw new ShipkitError(
           EXIT.CONFIG,
@@ -284,12 +298,28 @@ export class Shipkit {
 
       const only = (name: string) => !stage || stage === name
       const changesProduction = !stage || !["backup", "verify"].includes(stage)
-      if (changesProduction && !planToken) {
-        throw new ShipkitError(
-          EXIT.CONFIRM,
-          "this deploy would change production and has no plan token",
-          "Run `shipkit deploy --plan`, show the plan, then `shipkit deploy --yes=<token>`.",
-        )
+
+      if (changesProduction) {
+        if (!planToken) {
+          throw new ShipkitError(
+            EXIT.CONFIRM,
+            "this deploy would change production and has no plan token",
+            "Run `shipkit deploy --plan`, show the plan, then `shipkit deploy --yes=<token>`.",
+          )
+        }
+        // The plan is rebuilt from production as it is NOW. If anything it described has
+        // changed since it was shown, the token no longer matches and this stops — which is
+        // the entire point of hashing the plan rather than passing a boolean.
+        const plan = await buildPlan(source, cfg, env, target, adapter, sha, sshKey, cfg.health, registryToken)
+        r.set("plan", plan)
+        if (plan.token !== planToken) {
+          throw new ShipkitError(
+            EXIT.CONFIRM,
+            `the plan has changed since it was shown (token ${planToken} is now ${plan.token})`,
+            "Run `shipkit deploy --plan` again, look at what changed, and confirm the new plan.",
+          )
+        }
+        previousVersion = plan.currentImageTag
       }
 
       let backupResult: BackupResult | null = null
@@ -314,23 +344,61 @@ export class Shipkit {
             const from = await lastApplied(target, adapter.db!, sshKey)
             const pending = await adapter.db!.pendingList(source, cfg, from)
             const result = await runMigrations(
-              source, cfg, target, adapter.db!, sshKey, dbUrl, pending,
-              // Gate 2: without a backup result this refuses. Selecting `--stage=migrate`
-              // alone therefore cannot migrate production, which is the point.
-              backupResult,
+              source, cfg, target, adapter.db!, sshKey, dbUrl, pending, backupResult,
             )
             return withDetail(result, { from, applied: result.applied })
           })
         }
       } else r.skip("migrate", "not selected")
 
-      for (const name of ["release", "verify", "rollback", "clean"]) {
-        if (only(name)) throw notImplemented(name, "M6")
-        r.skip(name, "not selected")
-      }
+      if (only("release")) {
+        await r.stage("release", async () => {
+          if (previousVersion === null) {
+            previousVersion = await currentVersion(source, target, sshKey, registryToken)
+          }
+          await releaseImage(source, target, sshKey, tag, registryToken)
+          return withDetail(tag, { released: tag, previous: previousVersion })
+        })
+      } else r.skip("release", "not selected")
 
+      if (only("verify")) {
+        try {
+          await r.stage("verify", async () => {
+            const result = await verifyHealth(target, cfg.health, sha)
+            return withDetail(result, { verified: result })
+          })
+        } catch (err) {
+          // Gate 4 failed: the release did not take. Put the previous image back before
+          // anything else, then report red. The database is NOT rolled back — migrations
+          // roll forward, and the backup exists for the other case (ADR 0005).
+          if (previousVersion) {
+            await r.stage("rollback", async () => {
+              await rollbackTo(source, target, sshKey, previousVersion!, registryToken)
+              return withDetail(previousVersion!, {
+                rolledBackTo: previousVersion,
+                note: "the database was not rolled back; migrations roll forward",
+                backup: backupResult,
+              })
+            })
+          } else {
+            r.skip("rollback", "no previous version was recorded to roll back to")
+          }
+          throw err
+        }
+        r.skip("rollback", "not needed")
+      } else r.skip("verify", "not selected")
+
+      if (only("clean")) {
+        await r.stage("clean", async () => {
+          const summary = await cleanServer(source, target, sshKey, tag, registryToken)
+          return withDetail(summary, { pruned: summary })
+        })
+      } else r.skip("clean", "not selected")
+
+      r.skipRemaining(DEPLOY_STAGES)
       return serialize(r.success())
     } catch (err) {
+      r.skipRemaining(DEPLOY_STAGES)
       return serialize(r.failure(err))
     }
   }

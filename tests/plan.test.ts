@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { planToken } from "../.dagger/src/core/plan.ts"
+import { planToken } from "../.dagger/src/core/plan-token.ts"
 
 const base = {
   env: "prod",
@@ -38,4 +38,29 @@ test("cosmetic fields do not affect the token", () => {
   // The preview and the backup timestamp are display-only; they must not cause a token
   // mismatch between showing a plan and executing it seconds later.
   assert.equal(planToken(base), planToken({ ...base, sqlPreview: "13 lines", lastVerifiedBackup: null }))
+})
+
+test("what is actually serving does not affect the token", () => {
+  // servingVersion is shown to the reader as a cross-check against Kamal's tag. It must not
+  // change the token, or a health endpoint that reports a build timestamp would invalidate
+  // every plan the moment it was displayed.
+  assert.equal(
+    planToken({ ...base, servingVersion: "aaa" } as never),
+    planToken({ ...base, servingVersion: "bbb" } as never),
+  )
+})
+
+test("the token is stable across property order", () => {
+  const reordered = {
+    sqlDigest: base.sqlDigest,
+    migrations: base.migrations,
+    currentImageTag: base.currentImageTag,
+    imageTag: base.imageTag,
+    url: base.url,
+    env: base.env,
+    sqlPreview: base.sqlPreview,
+    destructive: base.destructive,
+    lastVerifiedBackup: base.lastVerifiedBackup,
+  }
+  assert.equal(planToken(base), planToken(reordered as never))
 })

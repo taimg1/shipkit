@@ -8,7 +8,11 @@ image: shipkit-fixture
 
 servers:
   web:
-    - server            # REAL: the server's hostname or IP
+    - host.docker.internal   # REAL: the server's hostname or IP
+
+ssh:
+  user: root
+  port: 2222               # REAL: 22
 
 proxy:
   # REAL: set `ssl: true` and a public `host:` — kamal-proxy then obtains a Let's Encrypt
@@ -37,7 +41,7 @@ env:
 accessories:
   db:
     image: postgres:17-alpine
-    host: server
+    host: host.docker.internal
     env:
       clear:
         POSTGRES_USER: postgres

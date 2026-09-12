@@ -27,6 +27,7 @@ shipkit — CI/CD for turnkey client projects
   shipkit db pending                 migrations not on main / not on prod
   shipkit deploy --plan              what would happen; changes nothing
   shipkit deploy --yes=<token>       execute exactly that plan
+                                     backup -> migrate -> release -> verify -> rollback -> clean
   shipkit rollback <sha>
   shipkit doctor                     dagger? docker? shipkit.yaml? project?
 
@@ -39,8 +40,14 @@ Options
   --module <ref>    shipkit module to call; default: the "kit:" line in shipkit.yaml
   --raw <args...>   pass through to \`dagger call\` untouched
 
+Options for deploy
+  --ssh-key <path>  private key for the target (or SHIPKIT_SSH_KEY)
+
 Environment
-  SHIPKIT_REGISTRY_TOKEN   registry credential, read by the engine, never passed as an argument
+  SHIPKIT_REGISTRY_TOKEN   registry credential
+  SHIPKIT_SSH_KEY          path to the deploy key
+  SHIPKIT_DATABASE_URL     production connection string, used by the migration bundle
+  All are read by the engine and never passed as arguments.
 
 Exit codes
   0 ok   1 gate said no   2 config   3 infrastructure   4 confirmation required
@@ -89,6 +96,26 @@ function gitBranch() {
  * listing, a shell history, or this tool's own run log.
  */
 const REGISTRY_TOKEN_VAR = "SHIPKIT_REGISTRY_TOKEN"
+const SSH_KEY_VAR = "SHIPKIT_SSH_KEY"
+const DB_URL_VAR = "SHIPKIT_DATABASE_URL"
+
+/**
+ * Credentials, passed by reference.
+ *
+ * `file:` and `env:` are Dagger's own syntax for reading a secret on the engine side. The
+ * values never become command-line arguments, so they cannot appear in a process listing, a
+ * shell history, or this tool's run log.
+ */
+function credentials(opts, { dbUrl = false } = {}) {
+  const args = []
+  const keyPath = opts["ssh-key"] || process.env[SSH_KEY_VAR]
+  if (keyPath) args.push(`--ssh-key=file:${keyPath}`)
+  // Only the stages that apply migrations take a connection string. Passing it to a function
+  // that has no such parameter is an error, not a harmless extra.
+  if (dbUrl && process.env[DB_URL_VAR]) args.push(`--db-url=env:${DB_URL_VAR}`)
+  if (process.env[REGISTRY_TOKEN_VAR]) args.push(`--registry-token=env:${REGISTRY_TOKEN_VAR}`)
+  return args
+}
 
 /**
  * Which shipkit module to call.
@@ -165,12 +192,20 @@ function translate(cmd, sub, opts) {
       return ["db-lint", ...src]
     case "db pending":
       return ["db-pending", ...src]
-    case "deploy":
-      if (opts.plan) return ["deploy-plan", ...src, `--env=${opts.env || "prod"}`, `--sha=${sha}`]
+    case "deploy": {
+      const target = [...src, `--env=${opts.env || "prod"}`, `--sha=${sha}`]
+      if (opts.plan) return ["deploy-plan", ...target, ...credentials(opts)]
       if (typeof opts.yes === "string") {
-        return ["deploy", ...src, `--plan-token=${opts.yes}`, `--env=${opts.env || "prod"}`, `--sha=${sha}`]
+        return [
+          "deploy",
+          ...target,
+          ...credentials(opts, { dbUrl: true }),
+          `--plan-token=${opts.yes}`,
+          ...(opts.stage ? [`--stage=${opts.stage}`] : []),
+        ]
       }
       return null // handled by the caller as "confirmation required"
+    }
     case "rollback":
       return ["rollback", ...src, `--sha=${opts._?.[1] ?? ""}`]
     case "doctor":
@@ -236,6 +271,7 @@ function render(report) {
     }
   }
   if (report.rendered) lines.push("", report.rendered)
+  if (report.plan && !report.rendered) lines.push("", `  plan token: ${report.plan.token}`)
   if (report.checks) {
     for (const [k, v] of Object.entries(report.checks)) {
       lines.push(`  ${v.startsWith("MISSING") ? "x" : "+"} ${k.padEnd(14)} ${v}`)

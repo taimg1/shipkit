@@ -20,9 +20,13 @@ export async function lastApplied(
     `select "${db.historyIdColumn}" from "${db.historyTable}" ` +
     `order by "${db.historyIdColumn}" desc limit 1`
 
+  // The query goes in on stdin, inside a quoted heredoc. Passing it as -c would mean the
+  // identifiers' own double quotes had to survive the remote shell — and they do not: the
+  // first `"MigrationId"` closes the argument and the command becomes something else.
+  // base64 protects the transport; this protects the script itself.
   const script =
-    `docker exec ${env.dbContainer} psql -U ${env.dbUser} -d ${env.database} ` +
-    `-tAc "${query}" 2>/dev/null || true`
+    `docker exec -i ${env.dbContainer} psql -U ${env.dbUser} -d ${env.database} -tA ` +
+    `2>/dev/null <<'SHIPKIT_SQL' || true\n${query}\nSHIPKIT_SQL\n`
 
   const out = await sshContainer(env, key)
     .withExec(["sh", "-c", remoteScript(env, script)])

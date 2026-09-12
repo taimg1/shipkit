@@ -1,50 +1,63 @@
-import { createHash } from "node:crypto"
+export { planToken, digest, renderPlan } from "./plan-token.js"
+export type { DeployPlan } from "./plan-token.js"
 
-export interface DeployPlan {
-  env: string
-  url: string
-  imageTag: string
-  currentImageTag: string | null
-  migrations: string[]
-  sqlDigest: string
-  sqlPreview: string
-  destructive: boolean
-  lastVerifiedBackup: string | null
-  /** Hash of everything above. `--yes` must present this exact token. */
-  token: string
-}
+import { DeployPlan, digest, planToken } from "./plan-token.js"
+import { Directory, Secret } from "@dagger.io/dagger"
+import { Config, Environment } from "../config.js"
+import { StackAdapter } from "../adapters/types.js"
+import { currentVersion } from "./release.js"
+import { lastApplied } from "./history.js"
+import { stripBom } from "./sql-scan.js"
+import { servingVersion as servingHealthVersion } from "./verify.js"
 
 /**
- * The token proves "this exact plan was displayed" — not "a human approved it".
- * Human approval is a rule on top (docs/cli-design.md), carried in CLAUDE.md and the skill.
+ * Gathers everything a person needs in order to say yes, from the places that actually know:
+ * the running version from the server, the applied migrations from the database.
  *
- * Hashing the plan's content rather than the commit SHA means the token also stops
- * matching when the current production image, the pending migration list, or the SQL
- * changes between showing the plan and executing it.
+ * Nothing here is read from the pipeline's own idea of the world. What a deploy is about to
+ * do depends on the state production is in, and that is exactly what a stale assumption gets
+ * wrong.
  */
-export function planToken(p: Omit<DeployPlan, "token">): string {
-  const canonical = JSON.stringify({
-    env: p.env,
-    url: p.url,
-    imageTag: p.imageTag,
-    currentImageTag: p.currentImageTag,
-    migrations: p.migrations,
-    sqlDigest: p.sqlDigest,
-  })
-  return createHash("sha256").update(canonical).digest("hex").slice(0, 12)
-}
+export async function buildPlan(
+  source: Directory,
+  cfg: Config,
+  envName: string,
+  env: Environment,
+  adapter: StackAdapter,
+  sha: string,
+  key: Secret,
+  healthPath: string,
+  registryPassword?: Secret,
+): Promise<DeployPlan> {
+  const imageTag = `sha-${sha.slice(0, 7)}`
+  const currentImageTag = await currentVersion(source, env, key, registryPassword)
+  const servingVersion = await servingHealthVersion(env, healthPath)
 
-export const digest = (s: string) => createHash("sha256").update(s).digest("hex").slice(0, 16)
+  let migrations: string[] = []
+  let sqlText = ""
+  if (cfg.db !== "none" && adapter.db) {
+    const from = await lastApplied(env, adapter.db, key)
+    migrations = await adapter.db.pendingList(source, cfg, from)
+    if (migrations.length > 0) {
+      sqlText = stripBom(await adapter.db.sqlBetween(source, cfg, from, null).contents())
+    }
+  }
 
-export function renderPlan(p: DeployPlan): string {
-  const lines = [
-    `  target      ${p.env}  (${p.url})`,
-    `  image       ${p.imageTag}${p.currentImageTag ? `  <-  currently ${p.currentImageTag}` : ""}`,
-    `  migrations  ${p.migrations.length > 0 ? p.migrations.join("\n              ") : "none"}`,
-    `  sql         ${p.sqlPreview}`,
-    `  backup      will run first; last verified ${p.lastVerifiedBackup ?? "never"}`,
-    "",
-    `  to execute: shipkit deploy --yes=${p.token}`,
-  ]
-  return lines.join("\n")
+  const base: Omit<DeployPlan, "token"> = {
+    env: envName,
+    url: env.url,
+    imageTag,
+    currentImageTag,
+    servingVersion,
+    migrations,
+    sqlDigest: digest(sqlText),
+    sqlPreview:
+      migrations.length === 0
+        ? "no schema change"
+        : `${sqlText.split("\n").filter((l) => l.trim().length > 0).length} lines`,
+    destructive: /\b(DROP\s+(COLUMN|TABLE)|ALTER\s+COLUMN)\b/i.test(sqlText),
+    lastVerifiedBackup: null,
+  }
+
+  return { ...base, token: planToken(base) }
 }

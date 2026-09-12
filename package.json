@@ -1,0 +1,17 @@
+{
+  "name": "shipkit",
+  "version": "0.1.0-prototype",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "shipkit": "./bin/shipkit"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "description": "CI/CD toolkit for turnkey .NET + EF Core + PostgreSQL client projects",
+  "scripts": {
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "check": "node --experimental-strip-types --check .dagger/src/index.ts"
+  }
+}

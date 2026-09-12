@@ -1,0 +1,27 @@
+# run reports written by the CLI
+.shipkit/
+
+# generated migration artifacts
+ci/*.sql
+ci/*.bundle
+
+# dagger
+/sdk/
+/.dagger/sdk/
+
+# node
+node_modules/
+
+# dotnet
+bin/
+obj/
+
+# secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# os
+.DS_Store

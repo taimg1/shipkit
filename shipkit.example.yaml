@@ -1,0 +1,26 @@
+# Copy to the root of a client repo as `shipkit.yaml`.
+# Missing file = the build fails with a message. There is no default — defaults hide
+# misconfiguration.
+
+kit: github.com/taimg1/shipkit@v1.0.0
+
+stack: dotnet          # v1 supports dotnet only
+db: postgres           # postgres | none
+delivery: kamal        # kamal | static
+
+# Both projects are required by `dotnet ef` and are never guessed: in most solutions the
+# startup project and the migrations project are different.
+project: src/Api
+migrationsProject: src/Infrastructure
+
+dockerfile: Dockerfile
+registry: ghcr.io/taimg1/client-api
+
+# /health must return {"status":"ok","version":"<sha>"}.
+# `verify` checks the SHA, not just the status code — a 200 from the previous container is
+# a failed deploy that looks green.
+health: /health
+
+environments:
+  prod:
+    url: https://api.client.com

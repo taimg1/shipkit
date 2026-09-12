@@ -36,6 +36,16 @@ export interface Config {
    */
   publish: boolean
   /**
+   * The language runtime version the project targets — `9.0`, `10.0`.
+   *
+   * Selects the SDK image, the image the migration bundle runs in, and the dotnet-ef major
+   * version. It was hardcoded to 10.0 until a real project turned out to be on 9.0, which is
+   * the kind of assumption a fixture written alongside the tool can never catch.
+   *
+   * `doctor` cross-checks it against the startup project's TargetFramework.
+   */
+  stackVersion: string
+  /**
    * Runtime identifier for the migration bundle. It MUST match the target server's
    * architecture — a linux-x64 bundle simply will not execute on an arm64 host, and the
    * failure happens on the server, mid-deploy, after the backup has already run.
@@ -142,6 +152,7 @@ export async function loadConfig(source: Directory): Promise<Config> {
     dockerfile: (c.dockerfile as string) ?? "Dockerfile",
     registry: (c.registry as string) ?? "",
     service,
+    stackVersion: (c.stackVersion as string) ?? "10.0",
     targetArch: (c.targetArch as string) ?? "linux-x64",
     defaultBranch: (c.defaultBranch as string) ?? "main",
     publish: c.publish === undefined ? true : c.publish === true,

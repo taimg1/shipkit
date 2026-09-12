@@ -53,3 +53,19 @@ export function migrationsAfter(ids: string[], from: string | null): string[] {
   const idx = ids.indexOf(from)
   return idx < 0 ? ids : ids.slice(idx + 1)
 }
+
+/**
+ * The version a project targets, from its `<TargetFramework>`: `net9.0` -> `9.0`.
+ *
+ * It selects the SDK image, the runtime image the migration bundle runs in, and the
+ * dotnet-ef major version. Getting it wrong fails deep inside a container with a message
+ * about a missing SDK, so it is worth reading from the project rather than assuming.
+ *
+ * `<TargetFrameworks>` (plural) is not handled: a project that multi-targets has no single
+ * answer, and guessing one would be worse than saying so.
+ */
+export function parseTargetFramework(csproj: string): string | null {
+  if (/<TargetFrameworks>/i.test(csproj)) return null
+  const tfm = /<TargetFramework>\s*net(\d+\.\d+)\s*<\/TargetFramework>/i.exec(csproj)
+  return tfm?.[1] ?? null
+}

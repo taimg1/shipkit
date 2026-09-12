@@ -11,7 +11,7 @@ import type { BackupResult } from "./backup.js"
  * irrelevant: an Alpine server cannot run a glibc-linked bundle directly, and discovering
  * that during a deploy is expensive.
  */
-const BUNDLE_RUNNER = "mcr.microsoft.com/dotnet/runtime-deps:10.0"
+const bundleRunner = (version: string) => `mcr.microsoft.com/dotnet/runtime-deps:${version}`
 
 export interface MigrateResult {
   applied: string[]
@@ -80,7 +80,7 @@ export async function migrate(
     `"set -e" ` +
     `"chmod +x ${remotePath}" ` +
     `"docker run --rm --network ${env.network} -v ${remotePath}:/efbundle:ro ` +
-    `${BUNDLE_RUNNER} /efbundle --connection \\"$SHIPKIT_DB_URL\\"" ` +
+    `${bundleRunner(cfg.stackVersion)} /efbundle --connection \\"$SHIPKIT_DB_URL\\"" ` +
     `| base64 | tr -d '\\n' | ${ssh} 'base64 -d | sh'`
 
   const runner = sshContainer(env, key)

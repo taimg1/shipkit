@@ -8,7 +8,7 @@ import {
   parseMigrationList,
 } from "./dotnet-parse.js"
 
-const SDK_IMAGE = "mcr.microsoft.com/dotnet/sdk:10.0"
+const sdkImage = (version: string) => `mcr.microsoft.com/dotnet/sdk:${version}`
 const SRC = "/src"
 
 /**
@@ -16,11 +16,13 @@ const SRC = "/src"
  * Restoring a manifest that does not list dotnet-ef leaves the command missing, so the
  * fallback is guarded by an actual invocation rather than by the manifest's presence.
  */
-const EF_TOOLING_SCRIPT = [
-  "set -e",
-  'if [ -f dotnet-tools.json ] || [ -f .config/dotnet-tools.json ]; then dotnet tool restore; fi',
-  'if ! dotnet ef --version >/dev/null 2>&1; then dotnet tool install --global dotnet-ef --version "10.*"; fi',
-].join("\n")
+const efToolingScript = (version: string) =>
+  [
+    "set -e",
+    "if [ -f dotnet-tools.json ] || [ -f .config/dotnet-tools.json ]; then dotnet tool restore; fi",
+    "if ! dotnet ef --version >/dev/null 2>&1; then " +
+      `dotnet tool install --global dotnet-ef --version "${version.split(".")[0]}.*"; fi`,
+  ].join("\n")
 
 /**
  * .NET + EF Core. The only adapter in v1.
@@ -32,10 +34,10 @@ export class DotnetAdapter implements StackAdapter {
   readonly name = "dotnet"
   readonly db: DbAdapter = new EfCoreDb()
 
-  restore(src: Directory, _cfg: Config): Container {
+  restore(src: Directory, cfg: Config): Container {
     return dag
       .container()
-      .from(SDK_IMAGE)
+      .from(sdkImage(cfg.stackVersion))
       // Cache busting is the main cost here: bin/ and obj/ are excluded at the --source
       // boundary in index.ts, so they never reach this directory.
       .withDirectory(SRC, src)
@@ -100,7 +102,7 @@ class EfCoreDb implements DbAdapter {
     return new DotnetAdapter()
       .restore(src, cfg)
       .withEnvVariable("PATH", "/root/.dotnet/tools:$PATH", { expand: true })
-      .withExec(["sh", "-c", EF_TOOLING_SCRIPT])
+      .withExec(["sh", "-c", efToolingScript(cfg.stackVersion)])
       .withExec(["dotnet", "build", "--no-restore"])
   }
 

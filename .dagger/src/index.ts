@@ -7,6 +7,7 @@
 import { argument, dag, Container, Directory, File, Secret, func, object } from "@dagger.io/dagger"
 import { Config, loadConfig } from "./config.js"
 import { selectAdapter } from "./adapters/index.js"
+import { parseTargetFramework } from "./adapters/dotnet-parse.js"
 import { EXIT, ShipkitError, notImplemented } from "./errors.js"
 import { ReportBuilder, execOutput, serialize, withDetail } from "./report.js"
 import { dbStage } from "./core/db.js"
@@ -468,6 +469,28 @@ export class Shipkit {
         checks["project"] = `ok (${cfg.project})`
       } catch {
         checks["project"] = `MISSING (${cfg.project})`
+      }
+
+      // The runtime version is declared in shipkit.yaml and again in the project file.
+      // Same rule as the service name: duplication is tolerable when something checks it,
+      // and an unchecked copy is how a project on net9.0 gets built with a .NET 10 SDK.
+      try {
+        const csprojDir = await source.directory(cfg.project).entries()
+        const csprojName = csprojDir.find((f) => f.endsWith(".csproj"))
+        if (csprojName) {
+          const csproj = await source.file(`${cfg.project}/${csprojName}`).contents()
+          const declared = parseTargetFramework(csproj)
+          if (declared && declared !== cfg.stackVersion) {
+            checks["stackVersion"] =
+              `MISMATCH (shipkit.yaml "${cfg.stackVersion}" vs ${csprojName} "net${declared}")`
+          } else if (declared) {
+            checks["stackVersion"] = `ok (${cfg.stackVersion})`
+          } else {
+            checks["stackVersion"] = `${cfg.stackVersion}, could not read TargetFramework`
+          }
+        }
+      } catch {
+        checks["stackVersion"] = `${cfg.stackVersion}, no project file read`
       }
 
       // Kamal's service name is duplicated between shipkit.yaml and config/deploy.yml.

@@ -1,6 +1,11 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { parseDotnetTestSummary, parseMigrationList, migrationsAfter } from "../.dagger/src/adapters/dotnet-parse.ts"
+import {
+  parseDotnetTestSummary,
+  parseMigrationList,
+  migrationsAfter,
+  parseTargetFramework,
+} from "../.dagger/src/adapters/dotnet-parse.ts"
 
 // Captured from `dotnet test` on fixtures/dotnet-api, 2026-09-12.
 const REAL_PASS = `Test run for /src/tests/Api.IntegrationTests/bin/Debug/net10.0/Api.IntegrationTests.dll (.NETCoreApp,Version=v10.0)
@@ -78,4 +83,35 @@ test("an unknown deployed id is treated as everything pending, not nothing", () 
   // marker as "nothing pending" would skip the gate entirely.
   const ids = ["20260101000000_A", "20260202000000_B"]
   assert.deepEqual(migrationsAfter(ids, "20259999999999_Unknown"), ids)
+})
+
+// --- target framework -----------------------------------------------------------------
+
+test("reads the version a project targets", () => {
+  // Real Api.csproj shape, from Roadly.
+  const csproj = `<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+</Project>`
+  assert.equal(parseTargetFramework(csproj), "9.0")
+})
+
+test("reads a two-digit major version", () => {
+  assert.equal(parseTargetFramework(`<TargetFramework>net10.0</TargetFramework>`), "10.0")
+})
+
+test("a multi-targeting project has no single answer and says so", () => {
+  // Guessing one of them would pick an SDK image the project only half-supports.
+  const csproj = `<TargetFrameworks>net8.0;net9.0</TargetFrameworks>`
+  assert.equal(parseTargetFramework(csproj), null)
+})
+
+test("a non-net target framework is not read as a version", () => {
+  assert.equal(parseTargetFramework(`<TargetFramework>netstandard2.0</TargetFramework>`), null)
+})
+
+test("a project file without a target framework yields null", () => {
+  assert.equal(parseTargetFramework(`<Project Sdk="Microsoft.NET.Sdk" />`), null)
 })

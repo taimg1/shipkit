@@ -1,10 +1,26 @@
 import { dag, CacheSharingMode, Container, Directory, File, Service } from "@dagger.io/dagger"
 import { Config } from "../config.js"
 import { infraError } from "../errors.js"
-import { DbAdapter, StackAdapter } from "./types.js"
+import { DbAdapter, StackAdapter, TestSummary } from "./types.js"
+import {
+  migrationsAfter,
+  parseDotnetTestSummary,
+  parseMigrationList,
+} from "./dotnet-parse.js"
 
 const SDK_IMAGE = "mcr.microsoft.com/dotnet/sdk:10.0"
 const SRC = "/src"
+
+/**
+ * Makes `dotnet ef` available whatever the project's tooling arrangement is.
+ * Restoring a manifest that does not list dotnet-ef leaves the command missing, so the
+ * fallback is guarded by an actual invocation rather than by the manifest's presence.
+ */
+const EF_TOOLING_SCRIPT = [
+  "set -e",
+  'if [ -f dotnet-tools.json ] || [ -f .config/dotnet-tools.json ]; then dotnet tool restore; fi',
+  'if ! dotnet ef --version >/dev/null 2>&1; then dotnet tool install --global dotnet-ef --version "10.*"; fi',
+].join("\n")
 
 /**
  * .NET + EF Core. The only adapter in v1.
@@ -56,40 +72,62 @@ export class DotnetAdapter implements StackAdapter {
     } else if (cfg.db !== "none") {
       throw infraError("no postgres service was bound for the test stage")
     }
-    return t.withExec(["dotnet", "test", "--no-restore", "--logger", "trx;LogFileName=test.trx"])
+    return t.withExec(["dotnet", "test", "--no-restore"])
+  }
+
+  parseTestSummary(raw: string): TestSummary | null {
+    return parseDotnetTestSummary(raw)
   }
 }
 
 class EfCoreDb implements DbAdapter {
   readonly historyTable = "__EFMigrationsHistory"
 
-  /** SDK container with dotnet-ef available. */
+  /**
+   * SDK container with `dotnet ef` available AND a completed build.
+   *
+   * Two arrangements exist in the wild and the kit must accept both: a repo with a local
+   * tool manifest, and a repo with none. A manifest shadows a global install — `dotnet ef`
+   * then refuses with "Run dotnet tool restore" rather than falling back — so the manifest
+   * has to be restored first, and a global install is only the fallback.
+   *
+   * The build is not an optimisation. `dotnet ef migrations add` does not rebuild, so an
+   * assembly can easily lack the migration that was just written; `--no-build` below would
+   * then emit an empty script and the whole `db` gate would inspect nothing.
+   */
   private tooling(src: Directory, cfg: Config): Container {
     return new DotnetAdapter()
       .restore(src, cfg)
-      .withExec(["dotnet", "tool", "install", "--global", "dotnet-ef", "--version", "10.*"])
       .withEnvVariable("PATH", "/root/.dotnet/tools:$PATH", { expand: true })
+      .withExec(["sh", "-c", EF_TOOLING_SCRIPT])
+      .withExec(["dotnet", "build", "--no-restore"])
   }
 
   private projectArgs(cfg: Config): string[] {
     // Both projects come from shipkit.yaml — in a multi-project solution the startup and
     // migrations projects differ, and guessing produces a confusing failure deep in EF.
+    //
+    // The STARTUP project must reference Microsoft.EntityFrameworkCore.Design or the tools
+    // refuse to run. This is a requirement on the client project, not something the kit can
+    // supply — see fixtures/dotnet-api for the working arrangement.
     return ["--project", cfg.migrationsProject ?? cfg.project, "--startup-project", cfg.project]
   }
 
-  pendingSql(src: Directory, cfg: Config, from: string | null): File {
-    // NON-idempotent on purpose: --idempotent wraps statements in DO $$ blocks that Squawk
-    // may not analyse (ci-cd-plan.md §7.2). Lint this; apply the bundle.
-    const args = [
-      "dotnet", "ef", "migrations", "script",
-      from ?? "0", // "0" means "from the beginning" in EF
-      "", // empty target = HEAD; replaced below when a range is needed
-      "--output", "/out/migration.sql",
-      "--no-build",
-      ...this.projectArgs(cfg),
-    ].filter((a) => a !== "")
+  sqlBetween(src: Directory, cfg: Config, from: string | null, to: string | null): File {
+    // Verified argument form: `script <from> [<to>]`. "0" is EF's name for the beginning,
+    // and omitting <to> means the current head. A file containing only a UTF-8 BOM means the
+    // range is empty — which is why dbStage cross-checks against the migration list.
+    const range = to ? [from ?? "0", to] : [from ?? "0"]
 
-    return this.tooling(src, cfg).withExec(args).file("/out/migration.sql")
+    return this.tooling(src, cfg)
+      .withExec([
+        "dotnet", "ef", "migrations", "script",
+        ...range,
+        "--output", "/out/migration.sql",
+        "--no-build",
+        ...this.projectArgs(cfg),
+      ])
+      .file("/out/migration.sql")
   }
 
   applyArtifact(src: Directory, cfg: Config): Container {
@@ -124,12 +162,6 @@ class EfCoreDb implements DbAdapter {
       .withExec(["dotnet", "ef", "migrations", "list", "--no-build", ...this.projectArgs(cfg)])
       .stdout()
 
-    const ids = out
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => /^\d{14}_/.test(l))
-    if (!from) return ids
-    const idx = ids.indexOf(from)
-    return idx < 0 ? ids : ids.slice(idx + 1)
+    return migrationsAfter(parseMigrationList(out), from)
   }
 }

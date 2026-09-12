@@ -24,9 +24,11 @@ the pipeline portable to Woodpecker, Gitea Actions or GitLab CI.
 
 ## Status
 
-**Prototype (M0).** The module skeleton, the adapter seam and the CLI wrapper exist and have
-never been executed against a real Dagger engine — see `docs/prototype-status.md` for exactly
-what is verified and what is not. `docs/v1-plan.md` is the build order.
+**M0 done.** The module loads on a real Dagger engine (v0.21.9), `dagger functions` lists
+the pipeline entry points, and configuration failures produce messages and exit codes rather
+than stack traces. No pipeline stage has run yet — that needs the M1 fixture.
+See `docs/prototype-status.md` for exactly what is verified. `docs/v1-plan.md` is the build
+order.
 
 ## Docs
 

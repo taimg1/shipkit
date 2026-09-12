@@ -1,0 +1,318 @@
+#!/usr/bin/env node
+/**
+ * shipkit — a thin translator to `dagger call` (ADR 0009).
+ *
+ * This file must contain NO pipeline logic. Only three things belong here:
+ *   1. argument translation
+ *   2. output formatting
+ *   3. exit-code mapping
+ * If a change is none of those, it belongs in the Dagger module.
+ *
+ * Escape hatches, permanent:
+ *   shipkit --explain <cmd>   print the dagger call and exit
+ *   shipkit --raw <args...>   pass through to `dagger call` untouched
+ */
+import { spawn, spawnSync } from "node:child_process"
+import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs"
+import { newestMigrationId, parseKitRef } from "./lib.mjs"
+import { join } from "node:path"
+
+const EXIT = { OK: 0, GATE: 1, CONFIG: 2, INFRA: 3, CONFIRM: 4, NOT_IMPLEMENTED: 5 }
+
+const USAGE = `
+shipkit — CI/CD for turnkey client projects
+
+  shipkit ci [--stage <name>]        pre -> build -> test -> db -> push
+  shipkit db lint                    Squawk on pending migrations only
+  shipkit db pending                 migrations not on main / not on prod
+  shipkit deploy --plan              what would happen; changes nothing
+  shipkit deploy --yes=<token>       execute exactly that plan
+  shipkit rollback <sha>
+  shipkit doctor                     dagger? docker? shipkit.yaml? project?
+
+Options
+  --json            emit the raw report instead of a rendered table
+  --sha <sha>       commit being built (default: git rev-parse HEAD)
+  --branch <name>   branch being built; only the default branch publishes
+  --env <name>      deploy target (default: prod)
+  --explain         print the underlying \`dagger call\` and exit
+  --module <ref>    shipkit module to call; default: the "kit:" line in shipkit.yaml
+  --raw <args...>   pass through to \`dagger call\` untouched
+
+Environment
+  SHIPKIT_REGISTRY_TOKEN   registry credential, read by the engine, never passed as an argument
+
+Exit codes
+  0 ok   1 gate said no   2 config   3 infrastructure   4 confirmation required
+  5 not implemented in this version
+`
+
+function parseArgs(argv) {
+  const opts = { _: [] }
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]
+    if (a === "--raw") return { raw: argv.slice(i + 1), _: [] }
+    if (a.startsWith("--")) {
+      const eq = a.indexOf("=")
+      if (eq > -1) opts[a.slice(2, eq)] = a.slice(eq + 1)
+      else if (argv[i + 1] && !argv[i + 1].startsWith("--")) opts[a.slice(2)] = argv[++i]
+      else opts[a.slice(2)] = true
+    } else opts._.push(a)
+  }
+  return opts
+}
+
+function gitSha() {
+  // On a pull request GITHUB_SHA is the merge commit, which is not what gets deployed.
+  // The head SHA is, and it is what /health must report for `verify` to pass.
+  if (process.env.GITHUB_EVENT_NAME === "pull_request" && process.env.GITHUB_HEAD_REF) {
+    const r = spawnSync("git", ["rev-parse", "HEAD^2"], { encoding: "utf8" })
+    if (r.status === 0) return r.stdout.trim()
+  }
+  const r = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" })
+  return r.status === 0 ? r.stdout.trim() : "dev"
+}
+
+/** The branch being built. Only the default branch publishes. */
+function gitBranch() {
+  if (process.env.GITHUB_HEAD_REF) return process.env.GITHUB_HEAD_REF // pull request
+  if (process.env.GITHUB_REF_NAME) return process.env.GITHUB_REF_NAME // push
+  const r = spawnSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" })
+  return r.status === 0 ? r.stdout.trim() : undefined
+}
+
+/**
+ * The registry credential, passed by reference rather than by value.
+ *
+ * `env:NAME` is Dagger's syntax for reading a secret out of the environment on the engine
+ * side. The token never becomes a command-line argument, so it cannot end up in a process
+ * listing, a shell history, or this tool's own run log.
+ */
+const REGISTRY_TOKEN_VAR = "SHIPKIT_REGISTRY_TOKEN"
+
+/**
+ * Which shipkit module to call.
+ *
+ * A client repository has no `.dagger/` of its own — it pins a kit version in shipkit.yaml
+ * and Dagger fetches that module. Without a pin we call whatever module the working
+ * directory belongs to, which is how this repository runs against its own fixture.
+ *
+ * The `kit:` line is read with a line-anchored regex rather than a YAML parser. It is a
+ * single top-level scalar, the wrapper must stay dependency-free, and everything else in the
+ * file is the module's business — it validates the whole thing properly on the other side.
+ */
+function moduleRef(opts) {
+  if (opts.module) return opts.module
+  if (process.env.SHIPKIT_MODULE) return process.env.SHIPKIT_MODULE
+  try {
+    return parseKitRef(readFileSync("shipkit.yaml", "utf8"))
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The newest migration id that already exists on main — the diff base (decision D4), so a
+ * pull request is linted on what it adds rather than on every migration ever written.
+ *
+ * This is a git SHA translated into a migration id, which is the wrapper's job. It is NOT a
+ * git SHA passed through: `dotnet ef migrations script <git-sha>` fails with "migration not
+ * found", which is exactly the bug this replaced.
+ *
+ * Migration ids are a 14-digit timestamp followed by a name. That convention is the kit's,
+ * shared with the module's own list parser — EF, Prisma and Drizzle all follow it — so
+ * reading it here is not stack knowledge leaking into the wrapper.
+ *
+ * Returns undefined when there is no origin/main, no merge base, or no migrations yet. The
+ * module treats that as "lint everything", which is the safe direction.
+ */
+function migrationBase() {
+  const base = spawnSync("git", ["merge-base", "HEAD", "origin/main"], { encoding: "utf8" })
+  if (base.status !== 0) return undefined
+
+  const tree = spawnSync("git", ["ls-tree", "-r", "--name-only", base.stdout.trim()], {
+    encoding: "utf8",
+    maxBuffer: 32 * 1024 * 1024,
+  })
+  if (tree.status !== 0) return undefined
+
+  return newestMigrationId(tree.stdout)
+}
+
+/** Translates a shipkit command into `dagger call` arguments. Pure — no side effects. */
+function translate(cmd, sub, opts) {
+  const sha = opts.sha || gitSha()
+  const src = ["--source=."]
+
+  switch (`${cmd} ${sub ?? ""}`.trim()) {
+    case "ci": {
+      const a = ["ci", ...src, `--sha=${sha}`]
+      if (opts.stage) a.push(`--stage=${opts.stage}`)
+
+      const base = migrationBase()
+      if (base) a.push(`--migration-base=${base}`)
+
+      const branch = opts.branch || gitBranch()
+      if (branch) a.push(`--branch=${branch}`)
+
+      if (process.env[REGISTRY_TOKEN_VAR]) {
+        a.push(`--registry-token=env:${REGISTRY_TOKEN_VAR}`)
+        if (process.env.GITHUB_ACTOR) a.push(`--registry-user=${process.env.GITHUB_ACTOR}`)
+      }
+      return a
+    }
+    case "db lint":
+      return ["db-lint", ...src]
+    case "db pending":
+      return ["db-pending", ...src]
+    case "deploy":
+      if (opts.plan) return ["deploy-plan", ...src, `--env=${opts.env || "prod"}`, `--sha=${sha}`]
+      if (typeof opts.yes === "string") {
+        return ["deploy", ...src, `--plan-token=${opts.yes}`, `--env=${opts.env || "prod"}`, `--sha=${sha}`]
+      }
+      return null // handled by the caller as "confirmation required"
+    case "rollback":
+      return ["rollback", ...src, `--sha=${opts._?.[1] ?? ""}`]
+    case "doctor":
+      return ["doctor", ...src]
+    default:
+      return undefined
+  }
+}
+
+function daggerAvailable() {
+  return spawnSync("dagger", ["version"], { stdio: "ignore" }).status === 0
+}
+
+function run(args, { json }) {
+  return new Promise((resolve) => {
+    // Dagger prints its own progress to stderr; the function's return value lands on stdout.
+    const child = spawn("dagger", ["call", ...args], {
+      stdio: ["ignore", "pipe", json ? "ignore" : "inherit"],
+    })
+    let out = ""
+    child.stdout.on("data", (d) => (out += d))
+    child.on("error", () => resolve({ status: EXIT.INFRA, out: "" }))
+    child.on("close", (code) => resolve({ status: code, out }))
+  })
+}
+
+function record(report) {
+  try {
+    const dir = join(process.cwd(), ".shipkit", "runs")
+    mkdirSync(dir, { recursive: true })
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-")
+    writeFileSync(join(dir, `${stamp}-${(report.sha || "dev").slice(0, 7)}.json`),
+      JSON.stringify(report, null, 2))
+  } catch {
+    // Never fail a run because the log could not be written.
+  }
+}
+
+const ICON = { ok: "+", failed: "x", skipped: "-" }
+
+function render(report) {
+  const lines = []
+  for (const s of report.stages ?? []) {
+    const t = s.seconds != null ? `${s.seconds}s` : ""
+    const why = s.reason && s.status !== "ok" ? `  ${s.reason}` : ""
+    const detail = [
+      s.tag ? `tag=${s.tag}` : "",
+      s.tests ? `${s.tests.passed}/${s.tests.total} passed` : "",
+      Array.isArray(s.pending) && s.pending.length ? `${s.pending.length} pending` : "",
+    ]
+      .filter(Boolean)
+      .join("  ")
+    lines.push(
+      `  ${ICON[s.status] ?? "?"} ${s.name.padEnd(8)} ${t.padStart(6)}  ${detail}${why}`.trimEnd(),
+    )
+    if (s.command) lines.push(`      $ ${s.command}`)
+    for (const line of s.output ?? []) lines.push(`      ${line}`)
+    for (const f of s.findings ?? []) {
+      const where = f.line ? `${f.file ?? ""}:${f.line}` : (f.file ?? "")
+      lines.push(`      ${f.rule}${where ? `  ${where}` : ""}`)
+      if (f.sql) lines.push(`        ${f.sql}`)
+      else if (f.message) lines.push(`        ${f.message}`)
+    }
+  }
+  if (report.rendered) lines.push("", report.rendered)
+  if (report.checks) {
+    for (const [k, v] of Object.entries(report.checks)) {
+      lines.push(`  ${v.startsWith("MISSING") ? "x" : "+"} ${k.padEnd(14)} ${v}`)
+    }
+  }
+  if (report.pending) {
+    lines.push(`  pending: ${report.pending.length ? report.pending.join(", ") : "none"}`)
+  }
+  lines.push("")
+  lines.push(report.ok ? `  ok  (${report.seconds}s)` : `  FAILED  ${report.error ?? ""}`)
+  if (report.next) lines.push(`  next: ${report.next}`)
+  return lines.join("\n")
+}
+
+async function main() {
+  const argv = process.argv.slice(2)
+  if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
+    process.stdout.write(USAGE)
+    process.exit(EXIT.OK)
+  }
+
+  const opts = parseArgs(argv)
+
+  // Escape hatch: straight through to dagger, untouched.
+  if (opts.raw) {
+    const child = spawn("dagger", ["call", ...opts.raw], { stdio: "inherit" })
+    child.on("error", () => process.exit(EXIT.INFRA))
+    child.on("close", (c) => process.exit(c ?? EXIT.INFRA))
+    return
+  }
+
+  const [cmd, sub] = opts._
+  const args = translate(cmd, sub, opts)
+  const mod = moduleRef(opts)
+  if (args && mod) args.unshift("-m", mod)
+
+  if (args === undefined) {
+    process.stderr.write(`unknown command: ${[cmd, sub].filter(Boolean).join(" ")}\n${USAGE}`)
+    process.exit(EXIT.CONFIG)
+  }
+
+  if (args === null) {
+    process.stderr.write(
+      "deploy needs either --plan or --yes=<token>\n" +
+        "  run `shipkit deploy --plan`, show the plan, then `shipkit deploy --yes=<token>`\n",
+    )
+    process.exit(EXIT.CONFIRM)
+  }
+
+  if (opts.explain) {
+    process.stdout.write(`dagger call ${args.join(" ")}\n`)
+    process.exit(EXIT.OK)
+  }
+
+  if (!daggerAvailable()) {
+    process.stderr.write(
+      "dagger is not installed or not on PATH\n" +
+        "  install: curl -fsSL https://dl.dagger.io/dagger/install.sh | BIN_DIR=/usr/local/bin sh\n",
+    )
+    process.exit(EXIT.INFRA)
+  }
+
+  const { status, out } = await run(args, { json: !!opts.json })
+
+  let report
+  try {
+    report = JSON.parse(out)
+  } catch {
+    // The module always returns JSON. Anything else means Dagger itself failed —
+    // an engine error, a missing function, a module that did not build.
+    process.stderr.write(out || "dagger produced no output\n")
+    process.exit(status === 0 ? EXIT.INFRA : EXIT.INFRA)
+  }
+
+  record(report)
+  process.stdout.write(opts.json ? JSON.stringify(report, null, 2) + "\n" : render(report) + "\n")
+  process.exit(report.exitCode ?? (report.ok ? EXIT.OK : EXIT.GATE))
+}
+
+main()

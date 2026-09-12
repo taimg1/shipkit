@@ -48,6 +48,60 @@ export const dataLoss = (detail: string) =>
       "(expand/contract) — see docs/adr/0005.",
   )
 
+/** Gate 3 — tests ran and some failed. The counts travel with the failure. */
+export const testsFailed = (s: { passed: number; failed: number; total: number }) =>
+  new GateFailure(
+    "test",
+    `${s.failed} of ${s.total} test(s) failed`,
+    "The failing test names are in the stage output above.",
+  )
+
+/**
+ * Gate 3 — the test run discovered nothing.
+ *
+ * A runner that finds no tests exits 0. Without this the `test` stage would report a pass
+ * for a project whose test discovery is broken — green CI, nothing verified.
+ */
+export const noTestsRan = (detail: string) =>
+  new GateFailure(
+    "test",
+    `the test run reported no tests (${detail})`,
+    "Check test discovery: a runner that finds nothing still exits 0, so this is treated " +
+      "as a failure rather than a pass.",
+  )
+
+/**
+ * Gate 1d — the migration list and the generated SQL disagree.
+ *
+ * Almost always a stale assembly: `dotnet ef migrations add` does not rebuild, so `--no-build`
+ * generates a script from an assembly that does not contain the new migration. The result is
+ * an empty script that every other gate happily passes.
+ */
+export const emptyScript = (pending: string[]) =>
+  new GateFailure(
+    "empty-script",
+    `${pending.length} migration(s) pending but the generated SQL contains no schema change`,
+    "The compiled assembly is probably stale — build before generating the script. " +
+      "Failing closed: an empty script would pass every downstream gate without inspecting anything.",
+    pending.map((id) => ({ rule: "pending-not-in-script", message: id })),
+  )
+
+/**
+ * Gate 1e — an allow-loss marker that waives nothing.
+ *
+ * Without this, markers can be added preemptively — "just in case CI complains" — and a
+ * migration accumulates blanket permission to destroy things it does not yet destroy. A
+ * waiver has to correspond to an actual, observed loss or it is not a waiver, it is a hole.
+ */
+export const staleAllowance = (targets: string[]) =>
+  new GateFailure(
+    "stale-allowance",
+    `allow-loss marker(s) for ${targets.join(", ")} but nothing of that name was lost`,
+    "Remove the marker. A waiver must name something the migration actually destroys, " +
+      "otherwise it is standing permission for a future loss nobody reviewed.",
+    targets.map((t) => ({ rule: "stale-allow-loss", message: t })),
+  )
+
 /** Gate 2 — no verified backup, no migration. */
 export const backupUnverified = (reason: string) =>
   new GateFailure(

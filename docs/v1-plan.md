@@ -64,6 +64,7 @@ feeling. Sizes are relative (S/M/L), not dates.
   startup project), `migrationsProject`.
 - **Done when:** `dagger functions` lists `ci` and `deploy`; `dagger call ci --source=.`
   against an empty dir fails with *"shipkit.yaml not found"*, not a stack trace.
+- **DONE 2026-09-12** on Dagger v0.21.9. See `docs/prototype-status.md`.
 
 ### M1 — Fixture project and local baseline · S
 
@@ -75,6 +76,9 @@ feeling. Sizes are relative (S/M/L), not dates.
 - `docker-compose.yml` with app + Postgres on a named volume.
 - **Done when:** `docker compose up` → `curl :8080/health` returns the SHA; `dotnet test`
   passes locally via Testcontainers.
+- **DONE 2026-09-12.** 3 tests green against PostgreSQL 17 via Testcontainers;
+  `GIT_SHA=a1b2c3d4e5f6` → `{"status":"ok","version":"a1b2c3d4e5f6"}`; container reaches
+  `healthy`. Constraints found while building it are recorded in `fixtures/dotnet-api/README.md`.
 
 ### M2 — `ci`: `pre` + `build` + `test` · M
 
@@ -87,6 +91,9 @@ feeling. Sizes are relative (S/M/L), not dates.
 - **Done when:** on the fixture — `dagger call ci` is green; a deliberate format drift →
   red at `pre`; a deliberately failing test → red at `test`; `pre` is cached on the second
   run (restore is not repeated).
+- **DONE 2026-09-12.** All four verified. `pre` 97s → 0.2s cached; `build` tags `sha-<short>`;
+  `test` reports 3/3 against a bound Postgres service; format drift and a failing test each
+  fail with exit 1 and a readable reason.
 
 ### M3 — `ci`: `db` · L (the risky one)
 
@@ -110,6 +117,16 @@ feeling. Sizes are relative (S/M/L), not dates.
   `CONCURRENTLY` + `suppressTransaction` → green; a property rename → red (grep gate); the
   same rename with the D6 marker → red at apply-to-copy because the seed rows lost a column;
   a rename done properly as `RenameColumn` → green.
+- **DONE 2026-09-12**, with two corrections to the plan itself, both recorded in
+  `docs/runbooks/m3-db-gate-scenarios.md`:
+  - A correct `RenameColumn` is **red**, not green. During a zero-downtime swap both
+    application versions run at once, so a rename in a single release is a break — the gate
+    is right and the expectation above was wrong.
+  - D6 became `shipkit:allow-loss <target>` and applies to every destructive gate, so a
+    correctly marked drop is **green** with the loss printed. A blanket marker that waived
+    only the grep could never have shipped an intentional drop.
+  - The checkpoint held: the same destructive migration yields 3 Squawk findings plain and
+    **0** when wrapped in `DO $EF$`.
 
 ### M4 — `push` + thin trigger · S
 
@@ -122,6 +139,13 @@ feeling. Sizes are relative (S/M/L), not dates.
 - **Done when:** a PR on the real project runs `ci`; a merge to `main` produces an image in
   GHCR whose `/health` reports the merged SHA. GitHub free minutes are enough for now; a
   self-hosted runner is a later, separate change.
+- **DONE 2026-09-12 except the authenticated push.** Branch gating, `publish: false`, the
+  refusal to push without a freshly built image, the token passed by reference, and module
+  resolution are all verified. The publish call reached GHCR and was rejected for missing
+  credentials — no token on this machine carries `write:packages`. It completes on the first
+  merge to `main`, where `secrets.GITHUB_TOKEN` supplies the scope.
+- Added while building it: `publish: false` in `shipkit.yaml`, so a fixture or a library
+  declines to publish as a decision rather than by an accident of configuration.
 
 ### M5 — Server preparation · M · *blocked on hosting decision*
 

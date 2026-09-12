@@ -4,6 +4,10 @@
 
 kit: github.com/taimg1/shipkit@v1.0.0
 
+# Must match `service:` in config/deploy.yml. Kamal refuses an image whose `service` label
+# does not match, and it only labels images it built itself — so the kit labels ours.
+service: client-api
+
 stack: dotnet          # v1 supports dotnet only
 db: postgres           # postgres | none
 delivery: kamal        # kamal | static
@@ -15,6 +19,14 @@ migrationsProject: src/Infrastructure
 
 dockerfile: Dockerfile
 registry: ghcr.io/taimg1/client-api
+
+# Only merges to this branch publish an image. A branch build that pushed would put
+# unreviewed code in the registry under a tag indistinguishable from a released one — and
+# rollback selects images by tag.
+defaultBranch: main
+
+# Set to false for a project that never publishes an image (a fixture, a library).
+publish: true
 
 # /health must return {"status":"ok","version":"<sha>"}.
 # `verify` checks the SHA, not just the status code — a 200 from the previous container is

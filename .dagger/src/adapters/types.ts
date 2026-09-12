@@ -10,6 +10,13 @@ import { Config } from "../config.js"
  * NOTE: this interface is a guess made with one implementation. It becomes settled when a
  * second adapter exists and the first still passes — see docs/multi-stack-plan.md §7 step 3.
  */
+export interface TestSummary {
+  passed: number
+  failed: number
+  skipped: number
+  total: number
+}
+
 export interface StackAdapter {
   readonly name: string
 
@@ -25,6 +32,15 @@ export interface StackAdapter {
    */
   test(c: Container, cfg: Config, services: { postgres?: Service }): Container
 
+  /**
+   * Reads the test runner's own summary out of its output.
+   *
+   * The core needs the counts, not just the exit code: a run that discovers zero tests
+   * exits 0 and would otherwise be reported as a pass. Parsing is stack-specific, so it
+   * lives behind the seam; deciding that zero tests is a failure is the core's call.
+   */
+  parseTestSummary(raw: string): TestSummary | null
+
   /** Absent when `db: none`. */
   db?: DbAdapter
 }
@@ -37,11 +53,16 @@ export interface DbAdapter {
   lastApplied(dsn: string, cfg: Config, src: Directory): Promise<string | null>
 
   /**
-   * Plain, NON-idempotent SQL for everything after `from`. This is what Squawk lints;
-   * it must not be wrapped in DO $$ blocks, which Squawk may not analyse — the false-green
-   * risk in ci-cd-plan.md §7.2.
+   * Plain, NON-idempotent SQL for the migrations in `(from, to]`. `null` means the very
+   * beginning and the current head respectively.
+   *
+   * NON-idempotent matters: `--idempotent` wraps statements in DO $$ blocks that Squawk may
+   * not analyse, which would produce a false green (ci-cd-plan.md §7.2).
+   *
+   * It is a range rather than just "what is pending" because apply-to-copy needs to rebuild
+   * the schema as production has it before applying anything on top.
    */
-  pendingSql(src: Directory, cfg: Config, from: string | null): File
+  sqlBetween(src: Directory, cfg: Config, from: string | null, to: string | null): File
 
   /** The artifact that actually applies migrations in production. */
   applyArtifact(src: Directory, cfg: Config): Container

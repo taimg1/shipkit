@@ -1,9 +1,8 @@
 {
   "type": "module",
   "dependencies": {
-    "@dagger.io/dagger": "./sdk",
     "yaml": "^2.5.0"
-  },
+  ,"typescript":"5.9.3"},
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.5.0"

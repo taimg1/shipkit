@@ -1,5 +1,53 @@
 import { EXIT, ExitCode, ShipkitError } from "./errors.js"
 
+/**
+ * Dagger's ExecError carries the failing command and both output streams. Without pulling
+ * them out, a failed stage reports nothing but "exit code: 1" — which costs a debugging
+ * round trip every single time.
+ *
+ * Both streams are read because .NET writes build and test failures to stdout, not stderr;
+ * taking only stderr would have looked like an empty error.
+ */
+interface ExecErrorShape {
+  cmd: string[]
+  exitCode: number
+  stdout: string
+  stderr: string
+}
+
+const isExecError = (e: unknown): e is ExecErrorShape =>
+  typeof e === "object" && e !== null && "exitCode" in e && "stdout" in e && "stderr" in e
+
+/** The failing command's combined output, for callers that want to parse it themselves. */
+export function execOutput(err: unknown): string | null {
+  return isExecError(err) ? `${err.stdout}\n${err.stderr}` : null
+}
+
+/** Lines that actually say what went wrong, preferred over surrounding build chatter. */
+const INTERESTING = /\b(error|failed|Failed!|Unhandled exception|warning as error)\b/i
+
+export function describeExec(err: unknown, maxLines = 20): {
+  command?: string
+  exitCode?: number
+  output?: string[]
+} | null {
+  if (!isExecError(err)) return null
+
+  const all = `${err.stderr}\n${err.stdout}`
+    .split("\n")
+    .map((l) => l.trimEnd())
+    .filter((l) => l.trim().length > 0)
+
+  const interesting = all.filter((l) => INTERESTING.test(l))
+  const chosen = interesting.length > 0 ? interesting : all
+
+  return {
+    command: err.cmd?.join(" "),
+    exitCode: err.exitCode,
+    output: chosen.slice(-maxLines),
+  }
+}
+
 export type StageStatus = "ok" | "failed" | "skipped"
 
 export interface Finding {
@@ -47,15 +95,25 @@ export class ReportBuilder {
     private readonly sha: string,
   ) {}
 
-  /** Runs `fn` as a named stage, timing it and recording success or failure. */
-  async stage<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  /**
+   * Runs `fn` as a named stage, timing it and recording success or failure.
+   *
+   * A stage may return `withDetail(value, detail)` to put extra fields on its report entry;
+   * the caller still receives the plain value, because what the report shows and what the
+   * next stage needs are different things.
+   */
+  async stage<T>(name: string, fn: () => Promise<T | StageDetail<T>>): Promise<T> {
     const t0 = Date.now()
     try {
       const result = await fn()
       const entry: Stage = { name, status: "ok", seconds: secondsSince(t0) }
-      if (isStageDetail(result)) Object.assign(entry, result.detail)
+      if (isStageDetail(result)) {
+        Object.assign(entry, result.detail)
+        this.stages.push(entry)
+        return result.value as T
+      }
       this.stages.push(entry)
-      return result
+      return result as T
     } catch (err) {
       const entry: Stage = { name, status: "failed", seconds: secondsSince(t0) }
       if (err instanceof ShipkitError) {
@@ -65,6 +123,14 @@ export class ReportBuilder {
         if (findings) entry.findings = findings
       } else {
         entry.reason = err instanceof Error ? err.message : String(err)
+      }
+      const exec = describeExec(err)
+      if (exec) {
+        Object.assign(entry, exec)
+        // A command ran and returned non-zero: the code is what failed, not the machine.
+        // That is a gate saying no, and it must not be reported as an infrastructure problem —
+        // the two call for completely different reactions.
+        entry.gate ??= name
       }
       this.stages.push(entry)
       throw err
@@ -99,15 +165,22 @@ export class ReportBuilder {
 
   failure(err: unknown): Report {
     const known = err instanceof ShipkitError
+    const exec = describeExec(err)
+    if (exec?.output?.length) {
+      this.extra = { ...this.extra, failingCommand: exec.command }
+    }
+    // An ExecError means a command ran and said no — a gate. Anything else that is not a
+    // ShipkitError is the environment failing: the engine, a pull, a network.
+    const exitCode = known ? err.code : exec ? EXIT.GATE : EXIT.INFRA
     return {
       command: this.command,
       sha: this.sha,
       ok: false,
-      exitCode: known ? err.code : EXIT.INFRA,
+      exitCode,
       seconds: secondsSince(this.startedAt),
       stages: this.stages,
       error: err instanceof Error ? err.message : String(err),
-      next: known ? err.next : undefined,
+      next: known ? err.next : exec ? NEXT_FOR_EXEC : undefined,
       ...this.extra,
     }
   }
@@ -126,6 +199,10 @@ export const withDetail = <T>(value: T, detail: Record<string, unknown>): StageD
   value,
   detail,
 })
+
+const NEXT_FOR_EXEC =
+  "A command in this stage exited non-zero. The failing command and the relevant lines of " +
+  "its output are on the stage entry above."
 
 const secondsSince = (t: number) => Math.round((Date.now() - t) / 100) / 10
 

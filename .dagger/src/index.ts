@@ -8,9 +8,10 @@ import { argument, dag, Directory, Secret, func, object } from "@dagger.io/dagge
 import { loadConfig } from "./config.js"
 import { selectAdapter } from "./adapters/index.js"
 import { EXIT, ShipkitError, notImplemented } from "./errors.js"
-import { ReportBuilder, serialize, withDetail } from "./report.js"
+import { ReportBuilder, execOutput, serialize, withDetail } from "./report.js"
 import { dbStage } from "./core/db.js"
 import { postgresService } from "./core/postgres.js"
+import { noTestsRan, testsFailed } from "./core/gates.js"
 import { digest, planToken, renderPlan, DeployPlan } from "./core/plan.js"
 
 const CI_STAGES = ["pre", "build", "test", "db", "push"]
@@ -64,7 +65,26 @@ export class Shipkit {
       if (only("test")) {
         await r.stage("test", async () => {
           const pg = cfg.db === "none" ? undefined : postgresService("app_test")
-          await adapter.test(restored, cfg, { postgres: pg }).sync()
+          const container = adapter.test(restored, cfg, { postgres: pg })
+
+          let raw: string
+          try {
+            raw = await container.stdout()
+          } catch (err) {
+            // A failing run exits non-zero, but its output still carries the counts. Reporting
+            // "2 of 3 failed" beats reporting "exit code: 1" — the caller learns the shape of
+            // the failure without a second run.
+            const out = execOutput(err)
+            const summary = out ? adapter.parseTestSummary(out) : null
+            if (summary && summary.failed > 0) throw testsFailed(summary)
+            throw err
+          }
+
+          const summary = adapter.parseTestSummary(raw)
+          if (!summary) throw noTestsRan("no summary line in the runner output")
+          if (summary.total === 0) throw noTestsRan("total = 0")
+          if (summary.failed > 0) throw testsFailed(summary)
+          return withDetail(summary, { tests: summary })
         })
       } else r.skip("test", "not selected")
 

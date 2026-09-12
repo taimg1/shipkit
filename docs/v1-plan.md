@@ -91,6 +91,9 @@ feeling. Sizes are relative (S/M/L), not dates.
 - **Done when:** on the fixture — `dagger call ci` is green; a deliberate format drift →
   red at `pre`; a deliberately failing test → red at `test`; `pre` is cached on the second
   run (restore is not repeated).
+- **DONE 2026-09-12.** All four verified. `pre` 97s → 0.2s cached; `build` tags `sha-<short>`;
+  `test` reports 3/3 against a bound Postgres service; format drift and a failing test each
+  fail with exit 1 and a readable reason.
 
 ### M3 — `ci`: `db` · L (the risky one)
 

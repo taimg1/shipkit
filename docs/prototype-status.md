@@ -3,10 +3,9 @@
 Written 2026-09-12; updated the same day after installing Dagger v0.21.9 and running M0
 against a real engine.
 
-**M0 and M1 are verified.** The module loads on a real engine, configuration failures behave
-as designed, and the fixture project builds, tests against a real PostgreSQL, and serves its
-commit SHA from `/health` in a container. No `ci` STAGE has run yet — the Dagger stages
-themselves are M2.
+**M0, M1 and M2 are verified.** The module loads on a real engine, the fixture builds and
+serves its SHA, and `pre`, `build` and `test` now run as Dagger stages — green on the fixture,
+red on deliberate breakage, with the right exit code either way. `db` is next (M3).
 
 This document exists so that the next session does not mistake "written" for "working".
 
@@ -36,6 +35,13 @@ Actually executed, with output observed:
 | `dotnet ef` multi-project form | `--project src/Infrastructure --startup-project src/Api` works, given Design in the startup project |
 | `migrations list` output parsing | the `^\d{14}_` match separates ids from connection warnings and the trailing note |
 | `migrations script <from>` → HEAD | verified; `0` means "from the beginning" |
+| **M2 done #1**: `pre`, `build`, `test` green in Dagger | `pre` 0.2s cached, `build` tagged `sha-<short>`, `test` 3/3 |
+| **M2 done #2**: format drift fails `pre` | `dotnet format` reported the exact file and column; exit 1 |
+| **M2 done #3**: a failing test fails `test` | reported as `1 of 3 test(s) failed`; exit 1 |
+| **M2 done #4**: `pre` is cached | 97s first run, 0.2s second |
+| The Postgres service binding works | tests reported 3/3, which they could not have done without a database |
+| `source.dockerBuild({ dockerfile, buildArgs })` | verified |
+| The wrapper renders a real run end to end | stage table, tag, test counts, failing command, reason |
 | Dagger TS SDK API shape | the decorators, `defaultPath`, `ignore`, and the argument forms all compiled and ran |
 | The `yaml` dependency resolves inside the module | config parsing worked at runtime |
 
@@ -80,12 +86,31 @@ carries no schema change, that contradiction fails closed (`emptyScript` gate).
 Both fail-opens found so far (this one and the string-literal marker) were in the `db` stage.
 That is the stage that decides whether a client keeps their data.
 
+### Two more design faults, both found by running stages
+
+**Failures reported nothing.** The first `pre` failure said only `exit code: 1`. Dagger's
+`ExecError` carries the command and both streams, and the report was throwing them away —
+one debugging round trip per failure, forever. Now the failing command and the relevant
+output lines are on the stage entry. Both streams are read, because .NET writes build and
+test failures to stdout, not stderr.
+
+**Every failure was exit code 3.** A format violation was being reported as an
+infrastructure problem. An `ExecError` means a command ran and said no — that is a gate, exit
+1. Only errors that are not `ExecError` and not `ShipkitError` are the environment failing.
+Since the exit code is the entire contract for a non-human caller, this made the contract
+meaningless.
+
+A third, smaller one: `dotnet test` exiting 0 having discovered nothing would have been a
+pass. The adapter now parses the runner's summary and the core fails on zero tests.
+
 ### Still unverified
 
 | Assumption | Where | How to check |
 |---|---|---|
-| `withExec({ expect })`, `asService({ useEntrypoint })` | `core/db.ts`, `core/postgres.ts` | not reached yet — no Dagger stage has run |
-| That the adapter's containers work at all (restore, lint, test, tooling) | `adapters/dotnet.ts` | M2 — the commands are verified on the host, not yet inside Dagger |
+| `withExec({ expect })` | `core/db.ts` (Squawk) | M3 |
+| Squawk's image, JSON reporter flag, and field names | `core/db.ts` | M3 |
+| **Squawk does not see statements inside `DO $$`** | the whole reason we lint the non-idempotent script | M3 — still theoretical |
+| `applyArtifact` / migration bundles | `adapters/dotnet.ts` | M6 |
 | Squawk's JSON reporter flag and field names | `core/db.ts`, `core/sql-scan.ts` | M3. Unparseable output already fails closed |
 | **Squawk does not see statements inside `DO $$` blocks** | the reason the non-idempotent script is linted | M3 checkpoint. Until observed, the false-green risk (§7.2) is theoretical, and so is the gate |
 | `dotnet ef migrations script <from> <to>` argument form for "from X to HEAD" | `adapters/dotnet.ts` — the empty-string filter is a placeholder | M3, against the fixture |
@@ -112,6 +137,11 @@ about a minute; afterwards it is cached.
 
 ## Next
 
-M2 — `pre`, `build` and `test` as Dagger stages, run against `fixtures/dotnet-api`. Every
-command in those stages has now been verified on the host; M2 is about whether they behave
-the same inside a container, with caching and a service binding.
+M3 — the `db` stage. It already fails on something real: the fixture carries a local tool
+manifest (`dotnet-tools.json`), which shadows the adapter's global `dotnet-ef` install and
+makes EF demand `dotnet tool restore`. The adapter has to handle both arrangements, because
+client projects will have both.
+
+M3 also holds the checkpoint that the entire linting gate rests on: whether Squawk really
+does miss statements wrapped in `DO $$` blocks. Until that is observed, the reason for
+linting the non-idempotent script is an assumption.

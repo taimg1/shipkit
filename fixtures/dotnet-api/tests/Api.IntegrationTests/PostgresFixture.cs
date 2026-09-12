@@ -27,8 +27,9 @@ public sealed class PostgresFixture : IAsyncLifetime
             return;
         }
 
-        _container = new PostgreSqlBuilder()
-            .WithImage("postgres:17-alpine")
+        // The image goes to the constructor: the parameterless overload is obsolete, and
+        // the pre stage builds with -warnaserror, so using it fails the build.
+        _container = new PostgreSqlBuilder("postgres:17-alpine")
             .WithDatabase("app_test")
             .WithUsername("postgres")
             .WithPassword("postgres")

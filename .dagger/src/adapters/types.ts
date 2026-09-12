@@ -10,6 +10,13 @@ import { Config } from "../config.js"
  * NOTE: this interface is a guess made with one implementation. It becomes settled when a
  * second adapter exists and the first still passes — see docs/multi-stack-plan.md §7 step 3.
  */
+export interface TestSummary {
+  passed: number
+  failed: number
+  skipped: number
+  total: number
+}
+
 export interface StackAdapter {
   readonly name: string
 
@@ -24,6 +31,15 @@ export interface StackAdapter {
    * the adapter never starts its own database.
    */
   test(c: Container, cfg: Config, services: { postgres?: Service }): Container
+
+  /**
+   * Reads the test runner's own summary out of its output.
+   *
+   * The core needs the counts, not just the exit code: a run that discovers zero tests
+   * exits 0 and would otherwise be reported as a pass. Parsing is stack-specific, so it
+   * lives behind the seam; deciding that zero tests is a failure is the core's call.
+   */
+  parseTestSummary(raw: string): TestSummary | null
 
   /** Absent when `db: none`. */
   db?: DbAdapter

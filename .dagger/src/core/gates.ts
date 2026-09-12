@@ -48,6 +48,28 @@ export const dataLoss = (detail: string) =>
       "(expand/contract) — see docs/adr/0005.",
   )
 
+/** Gate 3 — tests ran and some failed. The counts travel with the failure. */
+export const testsFailed = (s: { passed: number; failed: number; total: number }) =>
+  new GateFailure(
+    "test",
+    `${s.failed} of ${s.total} test(s) failed`,
+    "The failing test names are in the stage output above.",
+  )
+
+/**
+ * Gate 3 — the test run discovered nothing.
+ *
+ * A runner that finds no tests exits 0. Without this the `test` stage would report a pass
+ * for a project whose test discovery is broken — green CI, nothing verified.
+ */
+export const noTestsRan = (detail: string) =>
+  new GateFailure(
+    "test",
+    `the test run reported no tests (${detail})`,
+    "Check test discovery: a runner that finds nothing still exits 0, so this is treated " +
+      "as a failure rather than a pass.",
+  )
+
 /**
  * Gate 1d — the migration list and the generated SQL disagree.
  *

@@ -5,7 +5,7 @@
  * it; `dagger call` prints it raw. Both paths are supported, permanently (ADR 0009).
  */
 import { argument, dag, Container, Directory, Secret, func, object } from "@dagger.io/dagger"
-import { loadConfig } from "./config.js"
+import { Config, loadConfig } from "./config.js"
 import { selectAdapter } from "./adapters/index.js"
 import { EXIT, ShipkitError, notImplemented } from "./errors.js"
 import { ReportBuilder, execOutput, serialize, withDetail } from "./report.js"
@@ -16,6 +16,20 @@ import { noTestsRan, testsFailed } from "./core/gates.js"
 import { digest, planToken, renderPlan, DeployPlan } from "./core/plan.js"
 
 const CI_STAGES = ["pre", "build", "test", "db", "push"]
+
+/**
+ * One definition of "the image", used by `ci` and by `image` alike, so that what gets
+ * inspected locally is what gets deployed.
+ */
+function buildImage(source: Directory, cfg: Config, sha: string): Container {
+  const built = source.dockerBuild({
+    dockerfile: cfg.dockerfile,
+    buildArgs: [{ name: "GIT_SHA", value: sha }],
+  })
+  // Kamal refuses an image without this label, and only labels images it built itself.
+  // Found the hard way: "Image ... is missing the 'service' label".
+  return cfg.service ? built.withLabel("service", cfg.service) : built
+}
 
 /** Excluded at the source boundary: build output busts Dagger's cache on every run. */
 const IGNORE = ["**/bin", "**/obj", "**/node_modules", "**/.git", "**/.shipkit"]
@@ -62,10 +76,7 @@ export class Shipkit {
 
       if (only("build")) {
         image = await r.stage("build", async () => {
-          const built = source.dockerBuild({
-            dockerfile: cfg.dockerfile,
-            buildArgs: [{ name: "GIT_SHA", value: sha }],
-          })
+          const built = buildImage(source, cfg, sha)
           await built.sync()
           return withDetail(built, { tag })
         })
@@ -129,6 +140,26 @@ export class Shipkit {
       r.skipRemaining(CI_STAGES)
       return serialize(r.failure(err))
     }
+  }
+
+  /**
+   * The production image, as a Container.
+   *
+   * `ci` builds and publishes in one run; this exposes the same image on its own, so it can
+   * be exported, inspected, or run locally:
+   *
+   *   dagger call image --source=. --sha=$(git rev-parse HEAD) export --path=image.tar
+   *
+   * It is the same code path `build` uses, label included — an image inspected here is the
+   * image that would be deployed, not a lookalike.
+   */
+  @func()
+  async image(
+    @argument({ defaultPath: ".", ignore: IGNORE }) source: Directory,
+    sha = "dev",
+  ): Promise<Container> {
+    const cfg = await loadConfig(source)
+    return buildImage(source, cfg, sha)
   }
 
   /** Squawk on pending migrations only — seconds, not minutes. */
@@ -267,8 +298,29 @@ export class Shipkit {
         checks["project"] = `MISSING (${cfg.project})`
       }
 
+      // Kamal's service name is duplicated between shipkit.yaml and config/deploy.yml.
+      // Duplication is tolerable when something checks it; silent drift here means an image
+      // that builds, publishes, and then cannot be deployed.
+      if (cfg.delivery === "kamal") {
+        try {
+          const deployYml = await source.file("config/deploy.yml").contents()
+          const declared = /^service:[ \t]*(\S+)[ \t]*$/m.exec(deployYml)?.[1]
+          if (!cfg.service) {
+            checks["service"] = `MISSING (config/deploy.yml says "${declared ?? "?"}")`
+          } else if (declared && declared !== cfg.service) {
+            checks["service"] = `MISMATCH (shipkit.yaml "${cfg.service}" vs deploy.yml "${declared}")`
+          } else {
+            checks["service"] = `ok (${cfg.service})`
+          }
+        } catch {
+          checks["service"] = cfg.service ? `ok (${cfg.service}), no config/deploy.yml yet` : "MISSING"
+        }
+      }
+
       r.set("checks", checks)
-      const bad = Object.entries(checks).filter(([, v]) => v.startsWith("MISSING"))
+      const bad = Object.entries(checks).filter(
+        ([, v]) => v.startsWith("MISSING") || v.startsWith("MISMATCH"),
+      )
       if (bad.length > 0) {
         throw new ShipkitError(
           EXIT.CONFIG,

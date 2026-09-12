@@ -1,0 +1,49 @@
+# Kamal owns delivery; the kit passes --version and never edits this file (ADR 0001).
+#
+# This configuration targets dev-server, the simulated host. A real deployment differs in
+# three places, all marked below: the server address, the registry, and TLS.
+service: shipkit-fixture
+
+image: shipkit-fixture
+
+servers:
+  web:
+    - server            # REAL: the server's hostname or IP
+
+proxy:
+  # REAL: set `ssl: true` and a public `host:` — kamal-proxy then obtains a Let's Encrypt
+  # certificate. ACME needs a name that resolves publicly, which is why it cannot be
+  # exercised here.
+  ssl: false
+  app_port: 8080
+  healthcheck:
+    path: /health
+    interval: 3
+    timeout: 30
+
+registry:
+  server: registry:5000  # REAL: ghcr.io
+  username: shipkit
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+builder:
+  arch: arm64
+
+env:
+  clear:
+    ConnectionStrings__Default: "Host=shipkit-fixture-db;Port=5432;Database=app;Username=postgres;Password=postgres"
+
+accessories:
+  db:
+    image: postgres:17-alpine
+    host: server
+    env:
+      clear:
+        POSTGRES_USER: postgres
+        POSTGRES_DB: app
+      secret:
+        - POSTGRES_PASSWORD
+    directories:
+      # A named volume. Never an ephemeral filesystem — losing this is losing the database.
+      - data:/var/lib/postgresql/data

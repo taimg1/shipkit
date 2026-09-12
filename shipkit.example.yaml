@@ -4,6 +4,10 @@
 
 kit: github.com/taimg1/shipkit@v1.0.0
 
+# Must match `service:` in config/deploy.yml. Kamal refuses an image whose `service` label
+# does not match, and it only labels images it built itself — so the kit labels ours.
+service: client-api
+
 stack: dotnet          # v1 supports dotnet only
 db: postgres           # postgres | none
 delivery: kamal        # kamal | static

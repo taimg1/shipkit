@@ -19,6 +19,15 @@ export interface Config {
   migrationsProject?: string
   dockerfile: string
   registry: string
+  /**
+   * Kamal's service name. It must match `service:` in config/deploy.yml — Kamal refuses to
+   * deploy an image that does not carry a matching `service` label, and it only applies that
+   * label to images it built itself. Ours are built by the pipeline, so the kit applies it.
+   *
+   * `doctor` cross-checks the two, because a duplicated value nobody verifies is a value
+   * that drifts.
+   */
+  service: string
   /** Merges to this branch are what may be published. */
   defaultBranch: string
   /**
@@ -95,6 +104,7 @@ export async function loadConfig(source: Directory): Promise<Config> {
     migrationsProject: c.migrationsProject as string | undefined,
     dockerfile: (c.dockerfile as string) ?? "Dockerfile",
     registry: (c.registry as string) ?? "",
+    service: (c.service as string) ?? "",
     defaultBranch: (c.defaultBranch as string) ?? "main",
     publish: c.publish === undefined ? true : c.publish === true,
     environments,

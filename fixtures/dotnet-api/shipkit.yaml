@@ -5,6 +5,7 @@
 # the kit and must always exercise the module it sits next to — pinning a released version
 # here would mean the kit's own CI tested a previous release instead of the change under test.
 
+service: shipkit-fixture
 stack: dotnet
 db: postgres
 delivery: kamal

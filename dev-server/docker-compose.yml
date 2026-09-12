@@ -1,0 +1,34 @@
+# A local stand-in for a client's server, plus the registry it pulls from.
+#
+# Everything here is disposable. `docker compose down -v` removes it completely, including
+# the "server's" disk, which is the point: rehearsing a restore is only meaningful if the
+# thing being restored can really be destroyed.
+name: shipkit-dev
+
+services:
+  registry:
+    image: registry:2
+    # Reachable as `registry:5000` from the server, and on the host for inspection.
+    ports:
+      - "5555:5000"
+    volumes:
+      - registry-data:/var/lib/registry
+
+  server:
+    build: .
+    # Required for Docker-in-Docker. Acceptable for a throwaway local container; it is also
+    # the clearest reason this arrangement must never be pointed at anything real.
+    privileged: true
+    command: ["--insecure-registry", "registry:5000"]
+    ports:
+      # Kamal connects here. 2222 rather than 22 so it cannot collide with the host's sshd.
+      - "2222:22"
+    volumes:
+      - ./.ssh:/keys:ro
+      - server-docker:/var/lib/docker
+    depends_on:
+      - registry
+
+volumes:
+  registry-data:
+  server-docker:

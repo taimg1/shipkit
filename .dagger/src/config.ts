@@ -35,8 +35,29 @@ export interface Config {
    * anything deployed from somewhere other than a registry.
    */
   publish: boolean
+  /**
+   * Runtime identifier for the migration bundle. It MUST match the target server's
+   * architecture — a linux-x64 bundle simply will not execute on an arm64 host, and the
+   * failure happens on the server, mid-deploy, after the backup has already run.
+   */
+  targetArch: string
   /** Deploy targets by name; `prod` must exist for `deploy`. */
-  environments: Record<string, { url: string }>
+  environments: Record<string, Environment>
+}
+
+export interface Environment {
+  /** Public URL the smoke test hits. */
+  url: string
+  /** SSH host. Absent until the environment is provisioned. */
+  host?: string
+  sshPort: number
+  sshUser: string
+  /** PostgreSQL container on the server. Defaults to Kamal's accessory naming. */
+  dbContainer?: string
+  /** Docker network the database is on. Defaults to Kamal's. */
+  network: string
+  database: string
+  dbUser: string
 }
 
 const STACKS: StackName[] = ["dotnet", "nest", "next", "custom"]
@@ -87,10 +108,26 @@ export async function loadConfig(source: Directory): Promise<Config> {
     throw configError(`delivery must be "kamal" or "static"`)
   }
 
-  const environments = (c.environments ?? {}) as Config["environments"]
-  for (const [name, env] of Object.entries(environments)) {
+  const service = (c.service as string) ?? ""
+  const rawEnvironments = (c.environments ?? {}) as Record<string, Record<string, unknown>>
+  const environments: Record<string, Environment> = {}
+
+  for (const [name, env] of Object.entries(rawEnvironments)) {
     if (!env || typeof env.url !== "string") {
       throw configError(`environment "${name}" needs a url`)
+    }
+    environments[name] = {
+      url: env.url,
+      host: env.host as string | undefined,
+      sshPort: Number(env.sshPort ?? 22),
+      sshUser: (env.sshUser as string) ?? "root",
+      // Kamal names an accessory's container "<service>-<accessory>" and puts it on a
+      // network called "kamal". Deriving them keeps two more values out of every config,
+      // and either can be overridden when a project does something else.
+      dbContainer: (env.dbContainer as string) ?? (service ? `${service}-db` : undefined),
+      network: (env.network as string) ?? "kamal",
+      database: (env.database as string) ?? "app",
+      dbUser: (env.dbUser as string) ?? "postgres",
     }
   }
 
@@ -104,7 +141,8 @@ export async function loadConfig(source: Directory): Promise<Config> {
     migrationsProject: c.migrationsProject as string | undefined,
     dockerfile: (c.dockerfile as string) ?? "Dockerfile",
     registry: (c.registry as string) ?? "",
-    service: (c.service as string) ?? "",
+    service,
+    targetArch: (c.targetArch as string) ?? "linux-x64",
     defaultBranch: (c.defaultBranch as string) ?? "main",
     publish: c.publish === undefined ? true : c.publish === true,
     environments,

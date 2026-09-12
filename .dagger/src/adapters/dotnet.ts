@@ -82,6 +82,7 @@ export class DotnetAdapter implements StackAdapter {
 
 class EfCoreDb implements DbAdapter {
   readonly historyTable = "__EFMigrationsHistory"
+  readonly historyIdColumn = "MigrationId"
 
   /**
    * SDK container with `dotnet ef` available AND a completed build.
@@ -131,30 +132,19 @@ class EfCoreDb implements DbAdapter {
   }
 
   applyArtifact(src: Directory, cfg: Config): Container {
-    // A bundle needs no SDK and no source on the target machine. It must be self-contained
-    // or it will not run on a bare server.
+    // A bundle needs no SDK and no source on the target machine, which is the whole reason
+    // migrations are applied this way rather than from the application.
+    //
+    // The runtime identifier must match the SERVER, not the machine building it. A linux-x64
+    // bundle does not execute on an arm64 host, and the failure surfaces on the server
+    // mid-deploy — after the backup has run and before anything is serving.
     return this.tooling(src, cfg).withExec([
       "dotnet", "ef", "migrations", "bundle",
-      "--self-contained", "-r", "linux-x64",
+      "--self-contained", "-r", cfg.targetArch,
       "--output", "/out/efbundle",
       "--force",
       ...this.projectArgs(cfg),
     ])
-  }
-
-  async lastApplied(dsn: string, _cfg: Config, _src: Directory): Promise<string | null> {
-    // D5: read the marker back from production rather than keeping a separate store.
-    const out = await dag
-      .container()
-      .from("postgres:17-alpine")
-      .withEnvVariable("CACHEBUST", Date.now().toString())
-      .withExec([
-        "psql", dsn, "-tAc",
-        `select "MigrationId" from "${this.historyTable}" order by "MigrationId" desc limit 1`,
-      ])
-      .stdout()
-    const id = out.trim()
-    return id.length > 0 ? id : null
   }
 
   async pendingList(src: Directory, cfg: Config, from: string | null): Promise<string[]> {

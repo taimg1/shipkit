@@ -23,6 +23,8 @@ services:
     ports:
       # Kamal connects here. 2222 rather than 22 so it cannot collide with the host's sshd.
       - "2222:22"
+      # kamal-proxy, so the smoke test can reach the deployed app the way a user would.
+      - "8080:80"
     volumes:
       - ./.ssh:/keys:ro
       - server-docker:/var/lib/docker

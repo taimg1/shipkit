@@ -22,6 +22,16 @@ registry: ghcr.io/taimg1/shipkit-fixture
 publish: false
 health: /health
 
+# Must match the SERVER's architecture, not the machine that builds the bundle. dev-server
+# is aarch64; a linux-x64 bundle would fail on it mid-deploy, after the backup has run.
+targetArch: linux-arm64
+
 environments:
   prod:
-    url: http://localhost:8080
+    # dev-server, the simulated host. Everything here would be the real server's details.
+    url: http://host.docker.internal:8080
+    host: host.docker.internal
+    sshPort: 2222
+    sshUser: root
+    database: app
+    dbUser: postgres

@@ -12,6 +12,9 @@ import { ReportBuilder, execOutput, serialize, withDetail } from "./report.js"
 import { dbStage } from "./core/db.js"
 import { postgresService } from "./core/postgres.js"
 import { push as pushImage } from "./core/push.js"
+import { backup as backupProduction, BackupResult } from "./core/backup.js"
+import { migrate as runMigrations } from "./core/migrate.js"
+import { lastApplied } from "./core/history.js"
 import { noTestsRan, testsFailed } from "./core/gates.js"
 import { digest, planToken, renderPlan, DeployPlan } from "./core/plan.js"
 
@@ -242,7 +245,12 @@ export class Shipkit {
 
   /**
    * Executes a previously displayed plan.
-   * `planToken` must match the token printed by `deployPlan`, or this refuses.
+   *
+   * Stage order and the gates between them are fixed by ADR 0004:
+   *   backup -> migrate -> release -> verify -> rollback -> clean
+   *
+   * `--stage` runs one stage on its own, for building and debugging the pipeline. Stages
+   * that change production still require a plan token; read-only ones do not.
    */
   @func()
   async deploy(
@@ -250,20 +258,78 @@ export class Shipkit {
     planToken?: string,
     env = "prod",
     sha = "dev",
+    stage?: string,
     sshKey?: Secret,
-    registryToken?: Secret,
+    dbUrl?: Secret,
   ): Promise<string> {
     const r = new ReportBuilder("deploy", sha)
     try {
-      await loadConfig(source)
-      if (!planToken) {
+      const cfg = await loadConfig(source)
+      const adapter = selectAdapter(cfg)
+      const target = cfg.environments[env]
+      if (!target) {
+        throw new ShipkitError(
+          EXIT.CONFIG,
+          `environment "${env}" is not defined in shipkit.yaml`,
+          `Defined: ${Object.keys(cfg.environments).join(", ") || "none"}.`,
+        )
+      }
+      if (!sshKey) {
+        throw new ShipkitError(
+          EXIT.CONFIG,
+          "deploy needs an SSH key for the target",
+          "Pass --ssh-key=file:<path> or set SHIPKIT_SSH_KEY.",
+        )
+      }
+
+      const only = (name: string) => !stage || stage === name
+      const changesProduction = !stage || !["backup", "verify"].includes(stage)
+      if (changesProduction && !planToken) {
         throw new ShipkitError(
           EXIT.CONFIRM,
-          "deploy requires a plan token",
+          "this deploy would change production and has no plan token",
           "Run `shipkit deploy --plan`, show the plan, then `shipkit deploy --yes=<token>`.",
         )
       }
-      throw notImplemented("deploy", "M6")
+
+      let backupResult: BackupResult | null = null
+      if (only("backup")) {
+        backupResult = await r.stage("backup", async () => {
+          const { result } = await backupProduction(target, sshKey)
+          return withDetail(result, { backup: result })
+        })
+      } else r.skip("backup", "not selected")
+
+      if (only("migrate")) {
+        if (cfg.db === "none" || !adapter.db) {
+          r.skip("migrate", `db=${cfg.db}`)
+        } else if (!dbUrl) {
+          throw new ShipkitError(
+            EXIT.CONFIG,
+            "migrate needs the production connection string",
+            "Pass --db-url=env:SHIPKIT_DATABASE_URL.",
+          )
+        } else {
+          await r.stage("migrate", async () => {
+            const from = await lastApplied(target, adapter.db!, sshKey)
+            const pending = await adapter.db!.pendingList(source, cfg, from)
+            const result = await runMigrations(
+              source, cfg, target, adapter.db!, sshKey, dbUrl, pending,
+              // Gate 2: without a backup result this refuses. Selecting `--stage=migrate`
+              // alone therefore cannot migrate production, which is the point.
+              backupResult,
+            )
+            return withDetail(result, { from, applied: result.applied })
+          })
+        }
+      } else r.skip("migrate", "not selected")
+
+      for (const name of ["release", "verify", "rollback", "clean"]) {
+        if (only(name)) throw notImplemented(name, "M6")
+        r.skip(name, "not selected")
+      }
+
+      return serialize(r.success())
     } catch (err) {
       return serialize(r.failure(err))
     }

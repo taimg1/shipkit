@@ -1,6 +1,8 @@
 {
   "name": "shipkit",
-  "engineVersion": "v0.18.6",
-  "sdk": { "source": "typescript" },
+  "engineVersion": "v0.21.9",
+  "sdk": {
+    "source": "typescript"
+  },
   "source": ".dagger"
 }

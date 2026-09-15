@@ -20,7 +20,8 @@ logic in the wrong layer.
 Raw Dagger stays a first-class path, permanently:
 
 - `shipkit --explain <cmd>` prints the underlying `dagger call …` and exits.
-- `shipkit --raw <args…>` passes through to `dagger call` untouched.
+- `shipkit --raw <args…>` passes through to `dagger call` as-is, with the module added
+  (`-m <ref>`) unless the arguments name one. Amended 2026-09-14, #3.
 
 `--yes` takes a plan token (a hash of the displayed plan), not a boolean.
 

@@ -9,17 +9,20 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
 
 jobs:
   ci:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # Required to publish to GHCR. The default GITHUB_TOKEN carries it; no PAT is needed.
-      packages: write
+      # Only with `publish: true` in shipkit.yaml. The default GITHUB_TOKEN carries it; no PAT
+      # is needed. Uncomment together with SHIPKIT_REGISTRY_TOKEN below.
+      # packages: write
     steps:
       - uses: actions/checkout@v4
         with:
+          # The full history: the migration diff base is the merge base with origin/main.
           fetch-depth: 0
 
       - uses: actions/setup-node@v4
@@ -31,9 +34,17 @@ jobs:
           curl -fsSL https://dl.dagger.io/dagger/install.sh \
             | DAGGER_VERSION=v0.21.9 BIN_DIR=/usr/local/bin sh
 
+      # The kit version is the commit on the `kit:` line of shipkit.yaml — the one place it is
+      # written, so the wrapper and the module it drives cannot come from different commits.
+      #
+      # Fetched as a tarball rather than `npx github:...`: npm 10.9, which ships with Node 22 on
+      # the runners, fails with "GitFetcher requires an Arborist constructor" (#10). Extracted to
+      # RUNNER_TEMP so the kit's own files never become part of --source=.
       - name: shipkit ci
-        env:
-          # Read by the engine from the environment. It is never passed as an argument, so it
-          # cannot appear in a process listing or a log.
-          SHIPKIT_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx --yes github:taimg1/shipkit ci
+        # env:
+        #   SHIPKIT_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          KIT_SHA=$(sed -n 's#^kit: github.com/taimg1/shipkit@\([0-9a-f]\{40\}\)$#\1#p' shipkit.yaml)
+          test -n "$KIT_SHA" || { echo "shipkit.yaml: no pinned kit: line (kit: github.com/taimg1/shipkit@<40-char commit>)"; exit 2; }
+          curl -fsSL "https://codeload.github.com/taimg1/shipkit/tar.gz/$KIT_SHA" | tar xz -C "$RUNNER_TEMP"
+          node "$RUNNER_TEMP/shipkit-$KIT_SHA/bin/shipkit" ci

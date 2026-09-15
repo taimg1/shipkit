@@ -3,6 +3,7 @@ import { Config } from "../config.js"
 import { DbAdapter } from "../adapters/types.js"
 import { Finding, withDetail } from "../report.js"
 import type { Loss } from "./schema-snapshot.js"
+import { ShipkitError } from "../errors.js"
 import { dataLoss, destructiveSql, emptyScript, squawkFailed, staleAllowance } from "./gates.js"
 import { PG_IMAGE, PG_PASSWORD, PG_USER, dsnFor, postgresService } from "./postgres.js"
 import {
@@ -15,6 +16,7 @@ import {
 import {
   applyAllowances,
   hasNoSchemaChange,
+  migrationForLine,
   parseAllowedLosses,
   parseSquawk,
   scanDestructive,
@@ -89,9 +91,38 @@ export async function dbStage(
   db: DbAdapter,
   from: string | null,
 ) {
+  // The base is on the entry whether the stage passes or fails. Without it a run with no base
+  // lints the entire history and reads exactly like a run with a base and bad migrations (#5).
+  const base = from ?? "none"
   const pending = await db.pendingList(src, cfg, from)
+
+  try {
+    return await gateMigrations(src, cfg, db, from, pending, base)
+  } catch (err) {
+    if (err instanceof ShipkitError) {
+      err.detail = { ...err.detail, base, pending }
+      if (!from) {
+        err.next =
+          `No migration base: all ${pending.length} migration(s) in the project were checked, ` +
+          `not only new ones. The base is the newest migration on origin/${cfg.defaultBranch}; ` +
+          `push that branch, or pass --migration-base=<id> for the migration production already has. ` +
+          (err.next ?? "")
+      }
+    }
+    throw err
+  }
+}
+
+async function gateMigrations(
+  src: Directory,
+  cfg: Config,
+  db: DbAdapter,
+  from: string | null,
+  pending: string[],
+  base: string,
+) {
   if (pending.length === 0) {
-    return withDetail<DbStageResult>({ pending: [], findings: [] }, { pending: [], note: "no pending migrations" })
+    return withDetail<DbStageResult>({ pending: [], findings: [] }, { base, pending: [], note: "no pending migrations" })
   }
 
   const sqlFile = db.sqlBetween(src, cfg, from, null)
@@ -105,10 +136,14 @@ export async function dbStage(
   // wherever it is read.
   const allowed = parseAllowedLosses(sqlText)
 
-  const findings = applyAllowances(await lintSql(sqlFile, src), sqlText, allowed)
+  // Findings name the migration they came from, not only a line in the combined script.
+  const located = (fs: Finding[]) =>
+    fs.map((f) => (f.line ? { ...f, migration: migrationForLine(sqlText, f.line, db.historyTable) } : f))
+
+  const findings = located(applyAllowances(await lintSql(sqlFile, src), sqlText, allowed))
   if (findings.length > 0) throw squawkFailed(findings)
 
-  const destructive = scanDestructive(sqlText)
+  const destructive = located(scanDestructive(sqlText))
   if (destructive.length > 0) throw destructiveSql(destructive)
 
   // The strongest mitigation for the rename trap: apply the migration to a copy that has
@@ -124,6 +159,7 @@ export async function dbStage(
   return withDetail<DbStageResult>(
     { pending, findings: [] },
     {
+      base,
       pending,
       checked: from
         ? `${pending.length} migration(s) applied to a copy of ${from}`

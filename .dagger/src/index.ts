@@ -4,18 +4,49 @@
  * Every function returns a JSON report (docs/cli-design.md). The `shipkit` wrapper renders
  * it; `dagger call` prints it raw. Both paths are supported, permanently (ADR 0009).
  */
-import { argument, dag, Container, Directory, Secret, func, object } from "@dagger.io/dagger"
+import { argument, dag, Container, Directory, File, Secret, func, object } from "@dagger.io/dagger"
 import { Config, loadConfig } from "./config.js"
 import { selectAdapter } from "./adapters/index.js"
+import { resolveTargetFramework, targetFrameworkSources } from "./adapters/dotnet-parse.js"
 import { EXIT, ShipkitError, notImplemented } from "./errors.js"
 import { ReportBuilder, execOutput, serialize, withDetail } from "./report.js"
 import { dbStage } from "./core/db.js"
 import { postgresService } from "./core/postgres.js"
 import { push as pushImage } from "./core/push.js"
+import { backup as backupProduction, BackupResult } from "./core/backup.js"
+import { migrate as runMigrations } from "./core/migrate.js"
+import { lastApplied } from "./core/history.js"
+import { waitForDatabase } from "./core/postgres-remote.js"
+import {
+  bootDatabase,
+  clean as cleanServer,
+  currentVersion,
+  release as releaseImage,
+  rollback as rollbackTo,
+} from "./core/release.js"
+import { verify as verifyHealth } from "./core/verify.js"
+import { buildPlan, renderPlan } from "./core/plan.js"
+import { KamalSsh, checkSsh, parseKamalSsh } from "./core/kamal-config.js"
+import { StackAdapter } from "./adapters/types.js"
+
+/** Config, adapter and environment, resolved once and validated together. */
+async function resolveTarget(source: Directory, env: string) {
+  const cfg = await loadConfig(source)
+  const adapter = selectAdapter(cfg)
+  const target = cfg.environments[env]
+  if (!target) {
+    throw new ShipkitError(
+      EXIT.CONFIG,
+      `environment "${env}" is not defined in shipkit.yaml`,
+      `Defined: ${Object.keys(cfg.environments).join(", ") || "none"}.`,
+    )
+  }
+  return { cfg, adapter: adapter as StackAdapter, target }
+}
 import { noTestsRan, testsFailed } from "./core/gates.js"
-import { digest, planToken, renderPlan, DeployPlan } from "./core/plan.js"
 
 const CI_STAGES = ["pre", "build", "test", "db", "push"]
+const DEPLOY_STAGES = ["provision", "backup", "migrate", "release", "verify", "rollback", "clean"]
 
 /**
  * One definition of "the image", used by `ci` and by `image` alike, so that what gets
@@ -54,8 +85,14 @@ export class Shipkit {
     /** Registry credential. A Secret, never a string — it must not reach a log or a report. */
     registryToken?: Secret,
     registryUser?: string,
+    /**
+     * The source has uncommitted changes, so it is not the commit `sha` names. The image is
+     * tagged and versioned `-dirty` and is never published.
+     */
+    dirty = false,
   ): Promise<string> {
     const r = new ReportBuilder("ci", sha)
+    if (dirty) r.set("dirty", true)
     const only = (name: string) => !stage || stage === name
 
     try {
@@ -71,12 +108,15 @@ export class Shipkit {
         })
       } else r.skip("pre", "not selected")
 
-      const tag = `sha-${sha.slice(0, 7)}`
+      // A dirty build must not be able to pass for the commit: not in its tag, and not in the
+      // version /health reports, which is what verify compares.
+      const version = dirty ? `${sha}-dirty` : sha
+      const tag = `sha-${sha.slice(0, 7)}${dirty ? "-dirty" : ""}`
       let image: Container | undefined
 
       if (only("build")) {
         image = await r.stage("build", async () => {
-          const built = buildImage(source, cfg, sha)
+          const built = buildImage(source, cfg, version)
           await built.sync()
           return withDetail(built, { tag })
         })
@@ -126,6 +166,16 @@ export class Shipkit {
           r.skip("push", `branch "${branch}" is not ${cfg.defaultBranch}`)
         } else if (!image) {
           r.skip("push", "no image was built in this run")
+        } else if (dirty) {
+          // A refusal, not a skip: this run was supposed to publish, and what it would publish
+          // is not the commit it is labelled with.
+          await r.stage("push", async () => {
+            throw new ShipkitError(
+              EXIT.CONFIG,
+              "refusing to publish an image built from uncommitted changes",
+              "Commit the changes and run ci again; the registry must only hold images of real commits.",
+            )
+          })
         } else {
           await r.stage("push", async () => {
             const address = await pushImage(image!, cfg, tag, registryToken, registryUser)
@@ -201,40 +251,38 @@ export class Shipkit {
 
   /**
    * Prints what a deploy would do and exits 0 without touching anything.
-   * The plan carries a token; `deploy` requires that exact token (ADR 0009).
+   *
+   * The plan carries a token — a hash of what was displayed. `deploy` requires that exact
+   * token, so an agent physically cannot deploy something it has not shown, and a plan that
+   * has gone stale (a new commit, production moved, another migration merged) stops matching
+   * rather than being quietly executed (ADR 0009).
    */
-  @func()
+  // Never cached: it reads a server, and Dagger caches function calls by default. A cached
+  // plan describes a production that no longer exists; a cached deploy reports ok without
+  // running (#17).
+  @func({ cache: "never" })
   async deployPlan(
     @argument({ defaultPath: ".", ignore: IGNORE }) source: Directory,
     env = "prod",
     sha = "dev",
+    sshKey?: Secret,
+    registryToken?: Secret,
   ): Promise<string> {
     const r = new ReportBuilder("deploy --plan", sha)
     try {
-      const cfg = await loadConfig(source)
-      const target = cfg.environments[env]
-      if (!target) {
+      const { cfg, adapter, target } = await resolveTarget(source, env)
+      if (!sshKey) {
         throw new ShipkitError(
           EXIT.CONFIG,
-          `environment "${env}" is not defined in shipkit.yaml`,
-          `Defined: ${Object.keys(cfg.environments).join(", ") || "none"}.`,
+          "reading production state needs an SSH key",
+          "Pass --ssh-key=file:<path> or set SHIPKIT_SSH_KEY.",
         )
       }
 
-      // M6 fills these from production: current image tag, last applied migration (D5),
-      // the pending SQL, and the last verified backup timestamp.
-      throw notImplemented("reading production state for the plan", "M6")
-
-      // Shape kept here so M6 is assembly, not design:
-      // const base: Omit<DeployPlan, "token"> = {
-      //   env, url: target.url, imageTag: `sha-${sha.slice(0, 7)}`,
-      //   currentImageTag, migrations, sqlDigest: digest(sqlText),
-      //   sqlPreview: `${sqlText.split("\n").length} lines`,
-      //   destructive: false, lastVerifiedBackup,
-      // }
-      // const plan: DeployPlan = { ...base, token: planToken(base) }
-      // r.set("plan", plan); r.set("rendered", renderPlan(plan))
-      // return serialize(r.success())
+      const plan = await buildPlan(source, cfg, env, target, adapter, sha, sshKey, cfg.health, registryToken)
+      r.set("plan", plan)
+      r.set("rendered", renderPlan(plan))
+      return serialize(r.success())
     } catch (err) {
       return serialize(r.failure(err))
     }
@@ -242,35 +290,204 @@ export class Shipkit {
 
   /**
    * Executes a previously displayed plan.
-   * `planToken` must match the token printed by `deployPlan`, or this refuses.
+   *
+   * Stage order and the gates between them are fixed by ADR 0004:
+   *   backup -> migrate -> release -> verify -> rollback -> clean
+   *
+   * Every gate fails closed. `--stage` runs one stage for building and debugging the
+   * pipeline; stages that change production still need a plan token, read-only ones do not.
    */
-  @func()
+  // Never cached: it reads a server, and Dagger caches function calls by default. A cached
+  // plan describes a production that no longer exists; a cached deploy reports ok without
+  // running (#17).
+  @func({ cache: "never" })
   async deploy(
     @argument({ defaultPath: ".", ignore: IGNORE }) source: Directory,
     planToken?: string,
     env = "prod",
     sha = "dev",
+    stage?: string,
     sshKey?: Secret,
+    dbUrl?: Secret,
     registryToken?: Secret,
   ): Promise<string> {
     const r = new ReportBuilder("deploy", sha)
+    const tag = `sha-${sha.slice(0, 7)}`
+    let previousVersion: string | null = null
+    let plannedProvision: string[] = []
+
     try {
-      await loadConfig(source)
-      if (!planToken) {
+      const { cfg, adapter, target } = await resolveTarget(source, env)
+      if (!sshKey) {
         throw new ShipkitError(
-          EXIT.CONFIRM,
-          "deploy requires a plan token",
-          "Run `shipkit deploy --plan`, show the plan, then `shipkit deploy --yes=<token>`.",
+          EXIT.CONFIG,
+          "deploy needs an SSH key for the target",
+          "Pass --ssh-key=file:<path> or set SHIPKIT_SSH_KEY.",
         )
       }
-      throw notImplemented("deploy", "M6")
+
+      const only = (name: string) => !stage || stage === name
+      const changesProduction = !stage || !["backup", "verify"].includes(stage)
+
+      if (changesProduction) {
+        if (!planToken) {
+          throw new ShipkitError(
+            EXIT.CONFIRM,
+            "this deploy would change production and has no plan token",
+            "Run `shipkit deploy --plan`, show the plan, then `shipkit deploy --yes=<token>`.",
+          )
+        }
+        // The plan is rebuilt from production as it is NOW. If anything it described has
+        // changed since it was shown, the token no longer matches and this stops — which is
+        // the entire point of hashing the plan rather than passing a boolean.
+        const plan = await buildPlan(source, cfg, env, target, adapter, sha, sshKey, cfg.health, registryToken)
+        r.set("plan", plan)
+        if (plan.token !== planToken) {
+          throw new ShipkitError(
+            EXIT.CONFIRM,
+            `the plan has changed since it was shown (token ${planToken} is now ${plan.token})`,
+            "Run `shipkit deploy --plan` again, look at what changed, and confirm the new plan.",
+          )
+        }
+        previousVersion = plan.currentImageTag
+        plannedProvision = plan.provision
+      }
+
+      if (plannedProvision.length > 0) {
+        await r.stage("provision", async () => {
+          if (plannedProvision.some((step) => step.startsWith("boot the database"))) {
+            await bootDatabase(source, target, sshKey, tag, registryToken)
+            await waitForDatabase(target, sshKey)
+          }
+          return withDetail(plannedProvision, { provisioned: plannedProvision })
+        })
+      } else r.skip("provision", "server already provisioned")
+
+      let backupResult: BackupResult | null = null
+      if (only("backup")) {
+        backupResult = await r.stage("backup", async () => {
+          const { result } = await backupProduction(target, sshKey)
+          return withDetail(result, { backup: result })
+        })
+      } else r.skip("backup", "not selected")
+
+      if (only("migrate")) {
+        if (cfg.db === "none" || !adapter.db) {
+          r.skip("migrate", `db=${cfg.db}`)
+        } else if (!dbUrl) {
+          throw new ShipkitError(
+            EXIT.CONFIG,
+            "migrate needs the production connection string",
+            "Pass --db-url=env:SHIPKIT_DATABASE_URL.",
+          )
+        } else {
+          await r.stage("migrate", async () => {
+            const from = await lastApplied(target, adapter.db!, sshKey)
+            const pending = await adapter.db!.pendingList(source, cfg, from)
+            const result = await runMigrations(
+              source, cfg, target, adapter.db!, sshKey, dbUrl, pending, backupResult,
+            )
+            return withDetail(result, { from, applied: result.applied })
+          })
+        }
+      } else r.skip("migrate", "not selected")
+
+      if (only("release")) {
+        await r.stage("release", async () => {
+          if (previousVersion === null) {
+            previousVersion = await currentVersion(source, target, sshKey, registryToken)
+          }
+          await releaseImage(source, target, sshKey, tag, registryToken)
+          return withDetail(tag, { released: tag, previous: previousVersion })
+        })
+      } else r.skip("release", "not selected")
+
+      if (only("verify")) {
+        try {
+          await r.stage("verify", async () => {
+            const result = await verifyHealth(target, cfg.health, sha)
+            return withDetail(result, { verified: result })
+          })
+        } catch (err) {
+          // Gate 4 failed: the release did not take. Put the previous image back before
+          // anything else, then report red. The database is NOT rolled back — migrations
+          // roll forward, and the backup exists for the other case (ADR 0005).
+          if (previousVersion) {
+            await r.stage("rollback", async () => {
+              await rollbackTo(source, target, sshKey, previousVersion!, registryToken)
+              return withDetail(previousVersion!, {
+                rolledBackTo: previousVersion,
+                note: "the database was not rolled back; migrations roll forward",
+                backup: backupResult,
+              })
+            })
+          } else {
+            r.skip("rollback", "no previous version was recorded to roll back to")
+          }
+          throw err
+        }
+        r.skip("rollback", "not needed")
+      } else r.skip("verify", "not selected")
+
+      if (only("clean")) {
+        await r.stage("clean", async () => {
+          const summary = await cleanServer(source, target, sshKey, tag, registryToken)
+          return withDetail(summary, { pruned: summary })
+        })
+      } else r.skip("clean", "not selected")
+
+      r.skipRemaining(DEPLOY_STAGES)
+      return serialize(r.success())
     } catch (err) {
+      r.skipRemaining(DEPLOY_STAGES)
       return serialize(r.failure(err))
     }
   }
 
+  /**
+   * A verified backup of production, on demand.
+   *
+   * The same code the deploy runs, exposed on its own — a dump that has been proven
+   * restorable by restoring it, not one that merely exists:
+   *
+   *   shipkit backup --out prod.pgc
+   *
+   * This is what makes a restore drill something a person can actually do. A backup strategy
+   * nobody has restored from is an assumption, and the day it stops being an assumption is
+   * the worst possible day to find out.
+   */
+  // Never cached: it reads a server, and Dagger caches function calls by default. A cached
+  // plan describes a production that no longer exists; a cached deploy reports ok without
+  // running (#17).
+  @func({ cache: "never" })
+  async backup(
+    @argument({ defaultPath: ".", ignore: IGNORE }) source: Directory,
+    env = "prod",
+    sshKey?: Secret,
+  ): Promise<File> {
+    const { target } = await resolveTarget(source, env)
+    if (!sshKey) {
+      throw new ShipkitError(
+        EXIT.CONFIG,
+        "backup needs an SSH key for the target",
+        "Pass --ssh-key=file:<path> or set SHIPKIT_SSH_KEY.",
+      )
+    }
+
+    const { result, dump } = await backupProduction(target, sshKey)
+    if (!dump) {
+      throw new ShipkitError(
+        EXIT.GATE,
+        `there is nothing to back up: ${result.status === "empty-database" ? result.reason : "no dump was produced"}`,
+        "Production has no schema yet. There is no dump to take and nothing to lose.",
+      )
+    }
+    return dump
+  }
+
   /** Environment and configuration checks, cheapest first. */
-  @func()
+  // Never cached: its checks will read servers (#14, #15), and a cached answer is a past one.
+  @func({ cache: "never" })
   async doctor(
     @argument({ defaultPath: ".", ignore: IGNORE }) source: Directory,
   ): Promise<string> {
@@ -296,6 +513,52 @@ export class Shipkit {
         checks["project"] = `ok (${cfg.project})`
       } catch {
         checks["project"] = `MISSING (${cfg.project})`
+      }
+
+      // The runtime version is declared in shipkit.yaml and again in the project file.
+      // Same rule as the service name: duplication is tolerable when something checks it,
+      // and an unchecked copy is how a project on net9.0 gets built with a .NET 10 SDK.
+      //
+      // A check that cannot run says so with WARN. Reporting it as a pass is how a project with
+      // its framework in Directory.Build.props sailed through (#8).
+      try {
+        const csprojName = (await source.directory(cfg.project).entries()).find((f) => f.endsWith(".csproj"))
+        if (!csprojName) {
+          checks["stackVersion"] = `WARN no .csproj in ${cfg.project}; ${cfg.stackVersion} not checked`
+        } else {
+          const files: { path: string; text: string }[] = []
+          for (const path of targetFrameworkSources(cfg.project, csprojName)) {
+            try {
+              files.push({ path, text: await source.file(path).contents() })
+            } catch {
+              // Absent: MSBuild would not import it either.
+            }
+          }
+          const resolved = resolveTargetFramework(files)
+          if (resolved.version === null) {
+            checks["stackVersion"] = `WARN ${resolved.reason}; ${cfg.stackVersion} not checked`
+          } else if (resolved.version !== cfg.stackVersion) {
+            checks["stackVersion"] =
+              `MISMATCH (shipkit.yaml "${cfg.stackVersion}" vs ${resolved.from} "net${resolved.version}")`
+          } else {
+            checks["stackVersion"] = `ok (${cfg.stackVersion}, from ${resolved.from})`
+          }
+        }
+      } catch {
+        checks["stackVersion"] = `WARN project directory unreadable; ${cfg.stackVersion} not checked`
+      }
+
+      // The kit and Kamal both SSH to the server; they must agree on how (#15).
+      if (cfg.delivery === "kamal") {
+        let kamal: KamalSsh | null = null
+        try {
+          kamal = parseKamalSsh(await source.file("config/deploy.yml").contents())
+        } catch {
+          // No deploy.yml yet: nothing to cross-check, the root warning still applies.
+        }
+        for (const [name, env] of Object.entries(cfg.environments)) {
+          if (env.host) checks[`ssh ${name}`] = checkSsh(name, env, kamal)
+        }
       }
 
       // Kamal's service name is duplicated between shipkit.yaml and config/deploy.yml.

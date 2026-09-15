@@ -1,0 +1,25 @@
+# Uptime Kuma — deliberately NOT on the server it watches.
+#
+# Monitoring that runs on the monitored machine tells you nothing at the moment it matters:
+# when the machine is gone, so is the thing that would have told you. Run this on a different
+# host, a different provider for preference — a small VPS, a home server, anywhere that fails
+# independently of production.
+#
+# Locally it runs against dev-server, which is a different container. That is enough to
+# rehearse the configuration; it is not enough to call it monitoring.
+name: shipkit-monitoring
+
+services:
+  uptime-kuma:
+    image: louislam/uptime-kuma:1
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    volumes:
+      - kuma-data:/app/data
+    # Needed only for the local rehearsal, so Kuma can reach dev-server's proxy on the host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  kuma-data:

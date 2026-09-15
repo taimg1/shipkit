@@ -6,6 +6,7 @@ import {
   hasNoSchemaChange,
   parseAllowedLosses,
   applyAllowances,
+  migrationForLine,
 } from "../.dagger/src/core/sql-scan.ts"
 
 // The EF rename trap: this is exactly what EF emits when a property is renamed.
@@ -192,4 +193,49 @@ test("a marker never waives a non-destructive rule", () => {
 CREATE INDEX ix ON orders ("CreatedAt");`
   const findings = [{ rule: "require-concurrent-index-creation", line: 2 }]
   assert.equal(applyAllowances(findings, sql, ["orders.CreatedAt"]).length, 1)
+})
+
+// --- which migration a script line belongs to (#5) ---
+
+// The shape `dotnet ef migrations script` emits, taken from a real project that uses
+// EFCore.NamingConventions (snake_case history columns).
+const COMBINED = `START TRANSACTION;
+ALTER TABLE bookings ADD passenger_count integer;
+
+INSERT INTO "__EFMigrationsHistory" (migration_id, product_version)
+VALUES ('20260906123517_OptionalPassengerCount', '10.0.1');
+
+COMMIT;
+
+START TRANSACTION;
+ALTER TABLE routes RENAME COLUMN origin TO origin_place_key;
+ALTER TABLE routes DROP COLUMN legacy_code;
+
+INSERT INTO "__EFMigrationsHistory" (migration_id, product_version)
+VALUES ('20260906204842_RenameRouteEndpoints', '10.0.1');
+
+COMMIT;
+`
+
+test("a finding is attributed to the migration whose block contains it", () => {
+  assert.equal(migrationForLine(COMBINED, 2, "__EFMigrationsHistory"), "20260906123517_OptionalPassengerCount")
+  assert.equal(migrationForLine(COMBINED, 10, "__EFMigrationsHistory"), "20260906204842_RenameRouteEndpoints")
+  assert.equal(migrationForLine(COMBINED, 11, "__EFMigrationsHistory"), "20260906204842_RenameRouteEndpoints")
+})
+
+test("the default EF column names work the same", () => {
+  const sql = `ALTER TABLE "Orders" DROP COLUMN "Legacy";\nINSERT INTO "__EFMigrationsHistory" ("MigrationId", "ProductVersion")\nVALUES ('20260912083112_InitialCreate', '10.0.0');`
+  assert.equal(migrationForLine(sql, 1, "__EFMigrationsHistory"), "20260912083112_InitialCreate")
+})
+
+test("a trailing COMMIT after the last record belongs to the last migration", () => {
+  assert.equal(migrationForLine(COMBINED, 16, "__EFMigrationsHistory"), "20260906204842_RenameRouteEndpoints")
+})
+
+test("a leading BOM does not shift the attribution", () => {
+  assert.equal(migrationForLine("\uFEFF" + COMBINED, 2, "__EFMigrationsHistory"), "20260906123517_OptionalPassengerCount")
+})
+
+test("a script that records no migration attributes nothing", () => {
+  assert.equal(migrationForLine("DROP TABLE x;", 1, "__EFMigrationsHistory"), undefined)
 })

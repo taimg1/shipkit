@@ -19,7 +19,29 @@ var version = Assembly.GetEntryAssembly()
     ?.GetCustomAttribute<AssemblyInformationalVersionAttribute>()
     ?.InformationalVersion ?? "unknown";
 
+// Liveness, and the deploy contract. Deliberately touches nothing: `verify` compares this
+// version against the SHA it just deployed, and a database blip must not fail a good deploy.
 app.MapGet("/health", () => Results.Ok(new { status = "ok", version }));
+
+// Readiness. This is the one monitoring should watch.
+//
+// Found during a restore drill: with the schema destroyed, /health still answered 200 while
+// the application could serve nothing. Watching only /health means a dead database pages
+// nobody.
+app.MapGet("/health/ready", async (AppDbContext db) =>
+{
+    try
+    {
+        await db.Database.ExecuteSqlRawAsync("select 1");
+        return Results.Ok(new { status = "ready", version });
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(
+            new { status = "unavailable", version, error = ex.GetType().Name },
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+});
 
 app.MapGet("/orders", async (AppDbContext db) => await db.Orders.ToListAsync());
 

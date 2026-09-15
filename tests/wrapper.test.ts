@@ -1,6 +1,17 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { newestMigrationId, parseKitRef } from "../bin/lib.mjs"
+import {
+  commandKey,
+  isDirty,
+  parseArgs,
+  parseDefaultBranch,
+  newestMigrationId,
+  parseKitRef,
+  rawCallArgs,
+  resolveModule,
+  translate,
+  validateOptions,
+} from "../bin/lib.mjs"
 
 // Real `git ls-tree -r --name-only` output shape.
 const TREE = `.gitignore
@@ -49,4 +60,157 @@ test("an indented kit key belongs to another block and is ignored", () => {
 
 test("a commented-out pin is not read", () => {
   assert.equal(parseKitRef(`# kit: github.com/taimg1/shipkit@v1.0.0\nstack: dotnet\n`), undefined)
+})
+
+// --- defaultBranch (#4) ---
+
+test("the diff base branch comes from shipkit.yaml", () => {
+  assert.equal(parseDefaultBranch(`service: api\ndefaultBranch: master\n`), "master")
+  assert.equal(parseDefaultBranch(`defaultBranch: "prod" # deployed\n`), "prod")
+})
+
+test("without defaultBranch the base branch is main, as in the module", () => {
+  assert.equal(parseDefaultBranch(`service: api\n`), "main")
+})
+
+// --- argument parsing and validation (#2) ---
+
+const ctx = (over: Record<string, unknown> = {}) => ({
+  sha: () => "abc1234def",
+  branch: () => "dev",
+  migrationBase: () => "20260101000000_FromGit",
+  dirty: () => false,
+  env: {},
+  ...over,
+})
+
+const argsFor = (argv: string[], c = ctx()) => {
+  const opts = parseArgs(argv)
+  const key = commandKey(opts._)
+  return { opts, key, invalid: validateOptions(key, opts), args: translate(key, opts, c) }
+}
+
+test("an explicit --migration-base reaches dagger instead of the git-derived one", () => {
+  // The bug: the flag was accepted, dropped, and Dagger returned a cached report.
+  const { invalid, args } = argsFor(["ci", "--migration-base=20260914063401_BookingRowVersion"])
+  assert.equal(invalid, undefined)
+  assert.ok(args.includes("--migration-base=20260914063401_BookingRowVersion"))
+  assert.ok(!args.includes("--migration-base=20260101000000_FromGit"))
+})
+
+test("--migration-base also works as two arguments", () => {
+  const { args } = argsFor(["ci", "--migration-base", "20260914063401_X"])
+  assert.ok(args.includes("--migration-base=20260914063401_X"))
+})
+
+test("the git base is only computed when the command needs it", () => {
+  let calls = 0
+  const c = ctx({ migrationBase: () => (calls++, "20260101000000_A") })
+  argsFor(["doctor"], c)
+  argsFor(["ci", "--migration-base=20260202000000_B"], c)
+  assert.equal(calls, 0)
+})
+
+test("db lint and db pending diff against the same base as ci", () => {
+  assert.ok(argsFor(["db", "lint"]).args.includes("--migration-base=20260101000000_FromGit"))
+  assert.ok(argsFor(["db", "pending"]).args.includes("--migration-base=20260101000000_FromGit"))
+})
+
+test("an option the command does not take is rejected, not ignored", () => {
+  const { invalid } = argsFor(["doctor", "--migration-base=X"])
+  assert.equal(invalid?.code, 2)
+  assert.match(invalid!.message, /unknown option --migration-base for "shipkit doctor"/)
+})
+
+test("a misspelled option is rejected and the real ones are listed", () => {
+  const { invalid } = argsFor(["ci", "--migrationbase=X"])
+  assert.equal(invalid?.code, 2)
+  assert.match(invalid!.message, /--migration-base/)
+})
+
+test("a value option without a value is a config error", () => {
+  assert.equal(argsFor(["ci", "--stage"]).invalid?.code, 2)
+})
+
+test("a bare --yes is a missing confirmation, exit 4", () => {
+  assert.equal(argsFor(["deploy", "--yes"]).invalid?.code, 4)
+})
+
+test("a flag never swallows the command after it", () => {
+  const opts = parseArgs(["--json", "ci"])
+  assert.equal(opts.json, true)
+  assert.deepEqual(opts._, ["ci"])
+})
+
+test("a flag given a value is rejected", () => {
+  assert.equal(argsFor(["ci", "--json=yes"]).invalid?.code, 2)
+})
+
+test("db subcommands are one command key", () => {
+  assert.equal(commandKey(["db", "lint"]), "db lint")
+  assert.equal(commandKey(["rollback", "sha-abc1234"]), "rollback")
+})
+
+// --- --raw and the module (#3, #7) ---
+
+test("options before --raw are kept, everything after is Dagger's", () => {
+  const opts = parseArgs(["--module", "github.com/x/shipkit@abc", "--raw", "ci", "--source=.", "--stage=pre"])
+  assert.equal(opts.module, "github.com/x/shipkit@abc")
+  assert.deepEqual(opts.raw, ["ci", "--source=.", "--stage=pre"])
+})
+
+test("--raw calls the resolved module", () => {
+  assert.deepEqual(rawCallArgs(["ci", "--source=."], "github.com/x/shipkit@abc"), [
+    "call", "-m", "github.com/x/shipkit@abc", "ci", "--source=.",
+  ])
+})
+
+test("--raw leaves a module named in the raw args alone", () => {
+  assert.deepEqual(rawCallArgs(["-m", "./other", "ci"], "github.com/x/shipkit@abc"), ["call", "-m", "./other", "ci"])
+})
+
+test("module order: --module, then SHIPKIT_MODULE, then kit:", () => {
+  const yamlText = "kit: from-yaml\n"
+  assert.equal(resolveModule({ option: "opt", envVar: "env", yamlText }).ref, "opt")
+  assert.equal(resolveModule({ envVar: "env", yamlText }).ref, "env")
+  assert.equal(resolveModule({ yamlText }).ref, "from-yaml")
+})
+
+test("inside the shipkit repository the local module is used", () => {
+  const r = resolveModule({ yamlText: "stack: dotnet\n", localModule: "shipkit" })
+  assert.equal(r.ref, undefined)
+  assert.equal(r.error, undefined)
+})
+
+test("a client project without a kit pin gets a config error, not a Dagger one", () => {
+  const r = resolveModule({ yamlText: "stack: dotnet\n", localModule: undefined })
+  assert.match(r.error!, /kit: github.com\/taimg1\/shipkit@<commit>/)
+})
+
+test("another project's dagger module is not mistaken for shipkit", () => {
+  assert.ok(resolveModule({ yamlText: "stack: dotnet\n", localModule: "something-else" }).error)
+})
+
+// --- dirty working tree (#6) ---
+
+test("uncommitted changes make the tree dirty", () => {
+  assert.equal(isDirty(" M Api/Program.cs\n?? Api/Dockerfile\n"), true)
+})
+
+test("a clean tree is not dirty", () => {
+  assert.equal(isDirty(""), false)
+})
+
+test("the tool's own run log does not make the tree dirty", () => {
+  assert.equal(isDirty("?? .shipkit/runs/2026-09-14-abc.json\n"), false)
+  assert.equal(isDirty("?? fixtures/dotnet-api/.shipkit/runs/x.json\n"), false)
+})
+
+test("a renamed file counts by its new path", () => {
+  assert.equal(isDirty("R  old.cs -> Api/New.cs\n"), true)
+})
+
+test("ci tells the module when the tree is dirty", () => {
+  assert.ok(argsFor(["ci"], ctx({ dirty: () => true })).args.includes("--dirty"))
+  assert.ok(!argsFor(["ci"]).args.includes("--dirty"))
 })

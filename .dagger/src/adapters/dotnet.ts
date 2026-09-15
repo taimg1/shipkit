@@ -8,7 +8,7 @@ import {
   parseMigrationList,
 } from "./dotnet-parse.js"
 
-const SDK_IMAGE = "mcr.microsoft.com/dotnet/sdk:10.0"
+const sdkImage = (version: string) => `mcr.microsoft.com/dotnet/sdk:${version}`
 const SRC = "/src"
 
 /**
@@ -16,11 +16,13 @@ const SRC = "/src"
  * Restoring a manifest that does not list dotnet-ef leaves the command missing, so the
  * fallback is guarded by an actual invocation rather than by the manifest's presence.
  */
-const EF_TOOLING_SCRIPT = [
-  "set -e",
-  'if [ -f dotnet-tools.json ] || [ -f .config/dotnet-tools.json ]; then dotnet tool restore; fi',
-  'if ! dotnet ef --version >/dev/null 2>&1; then dotnet tool install --global dotnet-ef --version "10.*"; fi',
-].join("\n")
+const efToolingScript = (version: string) =>
+  [
+    "set -e",
+    "if [ -f dotnet-tools.json ] || [ -f .config/dotnet-tools.json ]; then dotnet tool restore; fi",
+    "if ! dotnet ef --version >/dev/null 2>&1; then " +
+      `dotnet tool install --global dotnet-ef --version "${version.split(".")[0]}.*"; fi`,
+  ].join("\n")
 
 /**
  * .NET + EF Core. The only adapter in v1.
@@ -32,10 +34,10 @@ export class DotnetAdapter implements StackAdapter {
   readonly name = "dotnet"
   readonly db: DbAdapter = new EfCoreDb()
 
-  restore(src: Directory, _cfg: Config): Container {
+  restore(src: Directory, cfg: Config): Container {
     return dag
       .container()
-      .from(SDK_IMAGE)
+      .from(sdkImage(cfg.stackVersion))
       // Cache busting is the main cost here: bin/ and obj/ are excluded at the --source
       // boundary in index.ts, so they never reach this directory.
       .withDirectory(SRC, src)
@@ -82,6 +84,8 @@ export class DotnetAdapter implements StackAdapter {
 
 class EfCoreDb implements DbAdapter {
   readonly historyTable = "__EFMigrationsHistory"
+  // EF's default, then the name EFCore.NamingConventions gives it (snake_case).
+  readonly historyIdColumns = ["MigrationId", "migration_id"] as const
 
   /**
    * SDK container with `dotnet ef` available AND a completed build.
@@ -99,7 +103,7 @@ class EfCoreDb implements DbAdapter {
     return new DotnetAdapter()
       .restore(src, cfg)
       .withEnvVariable("PATH", "/root/.dotnet/tools:$PATH", { expand: true })
-      .withExec(["sh", "-c", EF_TOOLING_SCRIPT])
+      .withExec(["sh", "-c", efToolingScript(cfg.stackVersion)])
       .withExec(["dotnet", "build", "--no-restore"])
   }
 
@@ -131,30 +135,19 @@ class EfCoreDb implements DbAdapter {
   }
 
   applyArtifact(src: Directory, cfg: Config): Container {
-    // A bundle needs no SDK and no source on the target machine. It must be self-contained
-    // or it will not run on a bare server.
+    // A bundle needs no SDK and no source on the target machine, which is the whole reason
+    // migrations are applied this way rather than from the application.
+    //
+    // The runtime identifier must match the SERVER, not the machine building it. A linux-x64
+    // bundle does not execute on an arm64 host, and the failure surfaces on the server
+    // mid-deploy — after the backup has run and before anything is serving.
     return this.tooling(src, cfg).withExec([
       "dotnet", "ef", "migrations", "bundle",
-      "--self-contained", "-r", "linux-x64",
+      "--self-contained", "-r", cfg.targetArch,
       "--output", "/out/efbundle",
       "--force",
       ...this.projectArgs(cfg),
     ])
-  }
-
-  async lastApplied(dsn: string, _cfg: Config, _src: Directory): Promise<string | null> {
-    // D5: read the marker back from production rather than keeping a separate store.
-    const out = await dag
-      .container()
-      .from("postgres:17-alpine")
-      .withEnvVariable("CACHEBUST", Date.now().toString())
-      .withExec([
-        "psql", dsn, "-tAc",
-        `select "MigrationId" from "${this.historyTable}" order by "MigrationId" desc limit 1`,
-      ])
-      .stdout()
-    const id = out.trim()
-    return id.length > 0 ? id : null
   }
 
   async pendingList(src: Directory, cfg: Config, from: string | null): Promise<string[]> {

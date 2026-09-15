@@ -7,7 +7,7 @@ paying for a VPS and before the hosting decision is made.
 ```bash
 cd dev-server
 docker compose up -d --build          # first run generates nothing; see below for the key
-ssh -i .ssh/id_ed25519 -p 2222 root@localhost
+ssh -i .ssh/id_ed25519 -p 2222 deploy@localhost
 docker compose down -v                # removes it completely, including the server's disk
 ```
 

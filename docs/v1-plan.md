@@ -190,6 +190,17 @@ feeling. Sizes are relative (S/M/L), not dates.
 - `CLAUDE.md` snippet for client repos (the .NET rules, verbatim from §12 of the plan).
 - Tag `v1.0.0`. From here, changes to the core need a fixture scenario that fails without
   them.
+- **Runbooks, monitoring and the client CLAUDE.md snippet DONE 2026-09-12.** The restore
+  drill was performed for real: the production schema was dropped with
+  `DROP SCHEMA public CASCADE` and rebuilt from a dump the kit produced — both tables back,
+  both rows back with their values, migration history intact, the application serving real
+  data again. Dated in `docs/runbooks/restore.md`.
+- **The tag is deliberately not applied yet.** `v1.0.0` would claim two things that are not
+  true: an authenticated registry push has never run, and M5 — a real server with TLS, a
+  firewall and backups that leave the machine — has not been done. Both wait on the hosting
+  decision.
+- Added while writing the runbooks: `shipkit backup`, which hands over a dump already proven
+  restorable. A restore drill nobody can perform is a runbook nobody follows.
 
 ---
 

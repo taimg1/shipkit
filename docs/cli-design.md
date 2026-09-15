@@ -37,7 +37,10 @@ exists. It arrives with M6.
 The wrapper must never become the only way in. Two guarantees:
 
 - `shipkit --explain <command>` prints the exact `dagger call …` it would run, and exits.
-- `shipkit --raw <args…>` passes everything through to `dagger call` untouched.
+- `shipkit --raw <args…>` passes everything after it to `dagger call` as-is. The only thing
+  added is the module (`-m`), resolved like every other command — from `--module`,
+  `SHIPKIT_MODULE` or `kit:` — unless the raw arguments name one themselves. Without that the
+  hatch only worked inside this repository (#3).
 
 So in an emergency — a wrapper bug, a stage that needs a flag the wrapper does not expose,
 debugging the module itself — the underlying tool is one word away. Anything `shipkit` can

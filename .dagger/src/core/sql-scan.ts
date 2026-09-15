@@ -168,3 +168,38 @@ export function parseSquawk(raw: string): Finding[] {
     return [{ rule: "squawk-output-unparseable", message: text.slice(0, 500) }]
   }
 }
+
+/**
+ * Which migration a line of a combined migration script belongs to.
+ *
+ * The db gate lints one script covering every pending migration, so Squawk and the scan report
+ * a line in that script — `migration.sql:484` — which names nothing a developer can open (#5).
+ *
+ * Every migration's block ends by recording itself in the history table:
+ *
+ *   INSERT INTO "__EFMigrationsHistory" ("MigrationId", "ProductVersion")
+ *   VALUES ('20260906150532_AddBlogPosts', '10.0.1');
+ *
+ * so a line belongs to the first such record at or after it. Column names vary with naming
+ * conventions (`migration_id` under EFCore.NamingConventions), so only the table and the id
+ * shape are matched. Lines after the last record (a trailing COMMIT) belong to the last one.
+ *
+ * `line` is one-based, as findings are. Returns undefined when the script records nothing.
+ */
+export function migrationForLine(sqlText: string, line: number, historyTable: string): string | undefined {
+  const lines = stripBom(sqlText).split("\n")
+  const records: { line: number; id: string }[] = []
+  const table = historyTable.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const insert = new RegExp(`INSERT\\s+INTO\\s+"?${table}"?`, "i")
+
+  lines.forEach((text, i) => {
+    if (!insert.test(text)) return
+    // The id is on the INSERT line or within the VALUES that follow it.
+    const window = lines.slice(i, i + 3).join("\n")
+    const id = /'(\d{14}_[^']+)'/.exec(window)?.[1]
+    if (id) records.push({ line: i + 1, id })
+  })
+
+  if (records.length === 0) return undefined
+  return (records.find((r) => r.line >= line) ?? records[records.length - 1]).id
+}

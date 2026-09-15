@@ -69,3 +69,41 @@ export function parseTargetFramework(csproj: string): string | null {
   const tfm = /<TargetFramework>\s*net(\d+\.\d+)\s*<\/TargetFramework>/i.exec(csproj)
   return tfm?.[1] ?? null
 }
+
+/**
+ * Where MSBuild would look for a project's properties, in the order that decides them: the
+ * project file, then `Directory.Build.props` from the project's directory up to the root.
+ * MSBuild imports only the nearest props file, and a property set in the project overrides it.
+ *
+ * `projectDir` is relative to the source root, e.g. `Api` or `src/Api`.
+ */
+export function targetFrameworkSources(projectDir: string, csprojName: string): string[] {
+  const parts = projectDir.split("/").filter((p) => p && p !== ".")
+  const props: string[] = []
+  for (let i = parts.length; i >= 0; i--) {
+    props.push([...parts.slice(0, i), "Directory.Build.props"].join("/"))
+  }
+  return [[...parts, csprojName].join("/"), ...props]
+}
+
+export type TargetFrameworkResolution =
+  | { version: string; from: string }
+  | { version: null; reason: string }
+
+/**
+ * The target framework, from the first file that declares one.
+ *
+ * `files` are in `targetFrameworkSources` order; a file that does not exist is simply absent.
+ * A project that sets it in Directory.Build.props — common, and exactly what EasyTransfer does —
+ * used to read as "could not read TargetFramework" and pass the check anyway (#8).
+ */
+export function resolveTargetFramework(files: { path: string; text: string }[]): TargetFrameworkResolution {
+  for (const { path, text } of files) {
+    if (/<TargetFrameworks>/i.test(text)) {
+      return { version: null, reason: `${path} multi-targets (<TargetFrameworks>); there is no single version to check` }
+    }
+    const version = parseTargetFramework(text)
+    if (version) return { version, from: path }
+  }
+  return { version: null, reason: `no <TargetFramework> in ${files.map((f) => f.path).join(", ") || "any project file"}` }
+}

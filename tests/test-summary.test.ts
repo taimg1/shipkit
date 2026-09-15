@@ -5,6 +5,8 @@ import {
   parseMigrationList,
   migrationsAfter,
   parseTargetFramework,
+  resolveTargetFramework,
+  targetFrameworkSources,
 } from "../.dagger/src/adapters/dotnet-parse.ts"
 
 // Captured from `dotnet test` on fixtures/dotnet-api, 2026-09-12.
@@ -114,4 +116,54 @@ test("a non-net target framework is not read as a version", () => {
 
 test("a project file without a target framework yields null", () => {
   assert.equal(parseTargetFramework(`<Project Sdk="Microsoft.NET.Sdk" />`), null)
+})
+
+// --- target framework through Directory.Build.props (#8) ---
+
+test("the project file is read first, then props files from the project up to the root", () => {
+  assert.deepEqual(targetFrameworkSources("src/Api", "Api.csproj"), [
+    "src/Api/Api.csproj",
+    "src/Api/Directory.Build.props",
+    "src/Directory.Build.props",
+    "Directory.Build.props",
+  ])
+  assert.deepEqual(targetFrameworkSources("Api", "Api.csproj"), ["Api/Api.csproj", "Api/Directory.Build.props", "Directory.Build.props"])
+})
+
+const PROPS = `<Project>\n  <PropertyGroup>\n    <TargetFramework>net10.0</TargetFramework>\n  </PropertyGroup>\n</Project>`
+const BARE_CSPROJ = `<Project Sdk="Microsoft.NET.Sdk.Web">\n  <ItemGroup />\n</Project>`
+
+test("a framework set only in Directory.Build.props is found there", () => {
+  // The shape of EasyTransfer: nothing in Api.csproj, net10.0 in the root props.
+  assert.deepEqual(
+    resolveTargetFramework([
+      { path: "Api/Api.csproj", text: BARE_CSPROJ },
+      { path: "Directory.Build.props", text: PROPS },
+    ]),
+    { version: "10.0", from: "Directory.Build.props" },
+  )
+})
+
+test("the project file overrides the props file, as in MSBuild", () => {
+  const csproj = `<Project><PropertyGroup><TargetFramework>net9.0</TargetFramework></PropertyGroup></Project>`
+  assert.deepEqual(
+    resolveTargetFramework([
+      { path: "Api/Api.csproj", text: csproj },
+      { path: "Directory.Build.props", text: PROPS },
+    ]),
+    { version: "9.0", from: "Api/Api.csproj" },
+  )
+})
+
+test("nowhere declaring a framework is unresolved, with the places looked", () => {
+  const r = resolveTargetFramework([{ path: "Api/Api.csproj", text: BARE_CSPROJ }])
+  assert.equal(r.version, null)
+  assert.match((r as { reason: string }).reason, /Api\/Api.csproj/)
+})
+
+test("multi-targeting is unresolved, not guessed", () => {
+  const r = resolveTargetFramework([
+    { path: "Directory.Build.props", text: "<TargetFrameworks>net8.0;net9.0</TargetFrameworks>" },
+  ])
+  assert.equal(r.version, null)
 })

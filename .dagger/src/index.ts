@@ -7,7 +7,7 @@
 import { argument, dag, Container, Directory, File, Secret, func, object } from "@dagger.io/dagger"
 import { Config, loadConfig } from "./config.js"
 import { selectAdapter } from "./adapters/index.js"
-import { parseTargetFramework } from "./adapters/dotnet-parse.js"
+import { resolveTargetFramework, targetFrameworkSources } from "./adapters/dotnet-parse.js"
 import { EXIT, ShipkitError, notImplemented } from "./errors.js"
 import { ReportBuilder, execOutput, serialize, withDetail } from "./report.js"
 import { dbStage } from "./core/db.js"
@@ -82,8 +82,14 @@ export class Shipkit {
     /** Registry credential. A Secret, never a string — it must not reach a log or a report. */
     registryToken?: Secret,
     registryUser?: string,
+    /**
+     * The source has uncommitted changes, so it is not the commit `sha` names. The image is
+     * tagged and versioned `-dirty` and is never published.
+     */
+    dirty = false,
   ): Promise<string> {
     const r = new ReportBuilder("ci", sha)
+    if (dirty) r.set("dirty", true)
     const only = (name: string) => !stage || stage === name
 
     try {
@@ -99,12 +105,15 @@ export class Shipkit {
         })
       } else r.skip("pre", "not selected")
 
-      const tag = `sha-${sha.slice(0, 7)}`
+      // A dirty build must not be able to pass for the commit: not in its tag, and not in the
+      // version /health reports, which is what verify compares.
+      const version = dirty ? `${sha}-dirty` : sha
+      const tag = `sha-${sha.slice(0, 7)}${dirty ? "-dirty" : ""}`
       let image: Container | undefined
 
       if (only("build")) {
         image = await r.stage("build", async () => {
-          const built = buildImage(source, cfg, sha)
+          const built = buildImage(source, cfg, version)
           await built.sync()
           return withDetail(built, { tag })
         })
@@ -154,6 +163,16 @@ export class Shipkit {
           r.skip("push", `branch "${branch}" is not ${cfg.defaultBranch}`)
         } else if (!image) {
           r.skip("push", "no image was built in this run")
+        } else if (dirty) {
+          // A refusal, not a skip: this run was supposed to publish, and what it would publish
+          // is not the commit it is labelled with.
+          await r.stage("push", async () => {
+            throw new ShipkitError(
+              EXIT.CONFIG,
+              "refusing to publish an image built from uncommitted changes",
+              "Commit the changes and run ci again; the registry must only hold images of real commits.",
+            )
+          })
         } else {
           await r.stage("push", async () => {
             const address = await pushImage(image!, cfg, tag, registryToken, registryUser)
@@ -474,23 +493,34 @@ export class Shipkit {
       // The runtime version is declared in shipkit.yaml and again in the project file.
       // Same rule as the service name: duplication is tolerable when something checks it,
       // and an unchecked copy is how a project on net9.0 gets built with a .NET 10 SDK.
+      //
+      // A check that cannot run says so with WARN. Reporting it as a pass is how a project with
+      // its framework in Directory.Build.props sailed through (#8).
       try {
-        const csprojDir = await source.directory(cfg.project).entries()
-        const csprojName = csprojDir.find((f) => f.endsWith(".csproj"))
-        if (csprojName) {
-          const csproj = await source.file(`${cfg.project}/${csprojName}`).contents()
-          const declared = parseTargetFramework(csproj)
-          if (declared && declared !== cfg.stackVersion) {
+        const csprojName = (await source.directory(cfg.project).entries()).find((f) => f.endsWith(".csproj"))
+        if (!csprojName) {
+          checks["stackVersion"] = `WARN no .csproj in ${cfg.project}; ${cfg.stackVersion} not checked`
+        } else {
+          const files: { path: string; text: string }[] = []
+          for (const path of targetFrameworkSources(cfg.project, csprojName)) {
+            try {
+              files.push({ path, text: await source.file(path).contents() })
+            } catch {
+              // Absent: MSBuild would not import it either.
+            }
+          }
+          const resolved = resolveTargetFramework(files)
+          if (resolved.version === null) {
+            checks["stackVersion"] = `WARN ${resolved.reason}; ${cfg.stackVersion} not checked`
+          } else if (resolved.version !== cfg.stackVersion) {
             checks["stackVersion"] =
-              `MISMATCH (shipkit.yaml "${cfg.stackVersion}" vs ${csprojName} "net${declared}")`
-          } else if (declared) {
-            checks["stackVersion"] = `ok (${cfg.stackVersion})`
+              `MISMATCH (shipkit.yaml "${cfg.stackVersion}" vs ${resolved.from} "net${resolved.version}")`
           } else {
-            checks["stackVersion"] = `${cfg.stackVersion}, could not read TargetFramework`
+            checks["stackVersion"] = `ok (${cfg.stackVersion}, from ${resolved.from})`
           }
         }
       } catch {
-        checks["stackVersion"] = `${cfg.stackVersion}, no project file read`
+        checks["stackVersion"] = `WARN project directory unreadable; ${cfg.stackVersion} not checked`
       }
 
       // Kamal's service name is duplicated between shipkit.yaml and config/deploy.yml.

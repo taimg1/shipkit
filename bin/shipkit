@@ -10,21 +10,33 @@
  *
  * Escape hatches, permanent:
  *   shipkit --explain <cmd>   print the dagger call and exit
- *   shipkit --raw <args...>   pass through to `dagger call` untouched
+ *   shipkit --raw <args...>   pass through to `dagger call`; only the module is added
  */
 import { spawn, spawnSync } from "node:child_process"
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs"
-import { newestMigrationId, parseKitRef } from "./lib.mjs"
-import { join } from "node:path"
-
-const EXIT = { OK: 0, GATE: 1, CONFIG: 2, INFRA: 3, CONFIRM: 4, NOT_IMPLEMENTED: 5 }
+import { dirname, join } from "node:path"
+import {
+  COMMAND_OPTIONS,
+  EXIT,
+  commandKey,
+  isDirty,
+  namesModule,
+  newestMigrationId,
+  parseArgs,
+  parseDefaultBranch,
+  rawCallArgs,
+  resolveModule,
+  translate,
+  validateOptions,
+} from "./lib.mjs"
 
 const USAGE = `
 shipkit — CI/CD for turnkey client projects
 
   shipkit ci [--stage <name>]        pre -> build -> test -> db -> push
+    [--migration-base <id>]          diff base (default: newest migration on origin/<defaultBranch>)
   shipkit db lint                    Squawk on pending migrations only
-  shipkit db pending                 migrations not on main / not on prod
+  shipkit db pending                 migrations not on the default branch
   shipkit deploy --plan              what would happen; changes nothing
   shipkit deploy --yes=<token>       execute exactly that plan
                                      backup -> migrate -> release -> verify -> rollback -> clean
@@ -32,14 +44,15 @@ shipkit — CI/CD for turnkey client projects
   shipkit rollback <sha>
   shipkit doctor                     dagger? docker? shipkit.yaml? project?
 
-Options
+Options (an option a command does not take is an error, never ignored)
   --json            emit the raw report instead of a rendered table
   --sha <sha>       commit being built (default: git rev-parse HEAD)
   --branch <name>   branch being built; only the default branch publishes
   --env <name>      deploy target (default: prod)
   --explain         print the underlying \`dagger call\` and exit
   --module <ref>    shipkit module to call; default: the "kit:" line in shipkit.yaml
-  --raw <args...>   pass through to \`dagger call\` untouched
+  --raw <args...>   pass the rest to \`dagger call\` as-is; the module is still resolved
+                    from --module / SHIPKIT_MODULE / kit: unless the args name one
 
 Options for deploy
   --ssh-key <path>  private key for the target (or SHIPKIT_SSH_KEY)
@@ -54,21 +67,6 @@ Exit codes
   0 ok   1 gate said no   2 config   3 infrastructure   4 confirmation required
   5 not implemented in this version
 `
-
-function parseArgs(argv) {
-  const opts = { _: [] }
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i]
-    if (a === "--raw") return { raw: argv.slice(i + 1), _: [] }
-    if (a.startsWith("--")) {
-      const eq = a.indexOf("=")
-      if (eq > -1) opts[a.slice(2, eq)] = a.slice(eq + 1)
-      else if (argv[i + 1] && !argv[i + 1].startsWith("--")) opts[a.slice(2)] = argv[++i]
-      else opts[a.slice(2)] = true
-    } else opts._.push(a)
-  }
-  return opts
-}
 
 function gitSha() {
   // On a pull request GITHUB_SHA is the merge commit, which is not what gets deployed.
@@ -89,59 +87,41 @@ function gitBranch() {
   return r.status === 0 ? r.stdout.trim() : undefined
 }
 
-/**
- * The registry credential, passed by reference rather than by value.
- *
- * `env:NAME` is Dagger's syntax for reading a secret out of the environment on the engine
- * side. The token never becomes a command-line argument, so it cannot end up in a process
- * listing, a shell history, or this tool's own run log.
- */
-const REGISTRY_TOKEN_VAR = "SHIPKIT_REGISTRY_TOKEN"
-const SSH_KEY_VAR = "SHIPKIT_SSH_KEY"
-const DB_URL_VAR = "SHIPKIT_DATABASE_URL"
-
-/**
- * Credentials, passed by reference.
- *
- * `file:` and `env:` are Dagger's own syntax for reading a secret on the engine side. The
- * values never become command-line arguments, so they cannot appear in a process listing, a
- * shell history, or this tool's run log.
- */
-function credentials(opts, { dbUrl = false } = {}) {
-  const args = []
-  const keyPath = opts["ssh-key"] || process.env[SSH_KEY_VAR]
-  if (keyPath) args.push(`--ssh-key=file:${keyPath}`)
-  // Only the stages that apply migrations take a connection string. Passing it to a function
-  // that has no such parameter is an error, not a harmless extra.
-  if (dbUrl && process.env[DB_URL_VAR]) args.push(`--db-url=env:${DB_URL_VAR}`)
-  if (process.env[REGISTRY_TOKEN_VAR]) args.push(`--registry-token=env:${REGISTRY_TOKEN_VAR}`)
-  return args
+/** Uncommitted changes in the working tree. Not a git repository counts as clean: nothing to compare. */
+function workingTreeDirty() {
+  const r = spawnSync("git", ["status", "--porcelain", "--untracked-files=all", "--", "."], { encoding: "utf8" })
+  return r.status === 0 && isDirty(r.stdout)
 }
 
-/**
- * Which shipkit module to call.
- *
- * A client repository has no `.dagger/` of its own — it pins a kit version in shipkit.yaml
- * and Dagger fetches that module. Without a pin we call whatever module the working
- * directory belongs to, which is how this repository runs against its own fixture.
- *
- * The `kit:` line is read with a line-anchored regex rather than a YAML parser. It is a
- * single top-level scalar, the wrapper must stay dependency-free, and everything else in the
- * file is the module's business — it validates the whole thing properly on the other side.
- */
-function moduleRef(opts) {
-  if (opts.module) return opts.module
-  if (process.env.SHIPKIT_MODULE) return process.env.SHIPKIT_MODULE
+/** The name in the nearest dagger.json at or above the working directory, if any. */
+function localModuleName() {
+  let dir = process.cwd()
+  for (;;) {
+    const file = join(dir, "dagger.json")
+    if (existsSync(file)) {
+      try {
+        return JSON.parse(readFileSync(file, "utf8")).name
+      } catch {
+        return undefined
+      }
+    }
+    const parent = dirname(dir)
+    if (parent === dir) return undefined
+    dir = parent
+  }
+}
+
+function readShipkitYaml() {
   try {
-    return parseKitRef(readFileSync("shipkit.yaml", "utf8"))
+    return readFileSync("shipkit.yaml", "utf8")
   } catch {
     return undefined
   }
 }
 
 /**
- * The newest migration id that already exists on main — the diff base (decision D4), so a
- * pull request is linted on what it adds rather than on every migration ever written.
+ * The newest migration id that already exists on the default branch — the diff base (decision
+ * D4), so a pull request is linted on what it adds rather than on every migration ever written.
  *
  * This is a git SHA translated into a migration id, which is the wrapper's job. It is NOT a
  * git SHA passed through: `dotnet ef migrations script <git-sha>` fails with "migration not
@@ -151,11 +131,14 @@ function moduleRef(opts) {
  * shared with the module's own list parser — EF, Prisma and Drizzle all follow it — so
  * reading it here is not stack knowledge leaking into the wrapper.
  *
- * Returns undefined when there is no origin/main, no merge base, or no migrations yet. The
- * module treats that as "lint everything", which is the safe direction.
+ * The branch is `defaultBranch` from shipkit.yaml, not a hardcoded `main` (#4).
+ *
+ * Returns undefined when there is no such remote branch, no merge base, or no migrations yet.
+ * The module treats that as "lint everything", which is the safe direction, and says so.
  */
-function migrationBase() {
-  const base = spawnSync("git", ["merge-base", "HEAD", "origin/main"], { encoding: "utf8" })
+function migrationBase(yamlText) {
+  const branch = parseDefaultBranch(yamlText ?? "")
+  const base = spawnSync("git", ["merge-base", "HEAD", `origin/${branch}`], { encoding: "utf8" })
   if (base.status !== 0) return undefined
 
   const tree = spawnSync("git", ["ls-tree", "-r", "--name-only", base.stdout.trim()], {
@@ -165,66 +148,6 @@ function migrationBase() {
   if (tree.status !== 0) return undefined
 
   return newestMigrationId(tree.stdout)
-}
-
-/** Translates a shipkit command into `dagger call` arguments. Pure — no side effects. */
-function translate(cmd, sub, opts) {
-  const sha = opts.sha || gitSha()
-  const src = ["--source=."]
-
-  switch (`${cmd} ${sub ?? ""}`.trim()) {
-    case "ci": {
-      const a = ["ci", ...src, `--sha=${sha}`]
-      if (opts.stage) a.push(`--stage=${opts.stage}`)
-
-      const base = migrationBase()
-      if (base) a.push(`--migration-base=${base}`)
-
-      const branch = opts.branch || gitBranch()
-      if (branch) a.push(`--branch=${branch}`)
-
-      if (process.env[REGISTRY_TOKEN_VAR]) {
-        a.push(`--registry-token=env:${REGISTRY_TOKEN_VAR}`)
-        if (process.env.GITHUB_ACTOR) a.push(`--registry-user=${process.env.GITHUB_ACTOR}`)
-      }
-      return a
-    }
-    case "db lint":
-      return ["db-lint", ...src]
-    case "db pending":
-      return ["db-pending", ...src]
-    case "deploy": {
-      const target = [...src, `--env=${opts.env || "prod"}`, `--sha=${sha}`]
-      if (opts.plan) return ["deploy-plan", ...target, ...credentials(opts)]
-      if (typeof opts.yes === "string") {
-        return [
-          "deploy",
-          ...target,
-          ...credentials(opts, { dbUrl: true }),
-          `--plan-token=${opts.yes}`,
-          ...(opts.stage ? [`--stage=${opts.stage}`] : []),
-        ]
-      }
-      return null // handled by the caller as "confirmation required"
-    }
-    case "rollback":
-      return ["rollback", ...src, `--sha=${opts._?.[1] ?? ""}`]
-    case "backup": {
-      const out = opts.out || "prod-backup.pgc"
-      return [
-        "backup",
-        ...src,
-        `--env=${opts.env || "prod"}`,
-        ...credentials(opts),
-        "export",
-        `--path=${out}`,
-      ]
-    }
-    case "doctor":
-      return ["doctor", ...src]
-    default:
-      return undefined
-  }
 }
 
 function daggerAvailable() {
@@ -244,21 +167,24 @@ function run(args, { json }) {
   })
 }
 
+/** Writes the full report to .shipkit/runs and returns its path, relative to the working directory. */
 function record(report) {
   try {
-    const dir = join(process.cwd(), ".shipkit", "runs")
+    const dir = join(".shipkit", "runs")
     mkdirSync(dir, { recursive: true })
     const stamp = new Date().toISOString().replace(/[:.]/g, "-")
-    writeFileSync(join(dir, `${stamp}-${(report.sha || "dev").slice(0, 7)}.json`),
-      JSON.stringify(report, null, 2))
+    const file = join(dir, `${stamp}-${(report.sha || "dev").slice(0, 7)}.json`)
+    writeFileSync(file, JSON.stringify(report, null, 2))
+    return file
   } catch {
     // Never fail a run because the log could not be written.
+    return undefined
   }
 }
 
 const ICON = { ok: "+", failed: "x", skipped: "-" }
 
-function render(report) {
+function render(report, logPath) {
   const lines = []
   for (const s of report.stages ?? []) {
     const t = s.seconds != null ? `${s.seconds}s` : ""
@@ -266,6 +192,7 @@ function render(report) {
     const detail = [
       s.tag ? `tag=${s.tag}` : "",
       s.tests ? `${s.tests.passed}/${s.tests.total} passed` : "",
+      s.base !== undefined ? `base=${s.base}` : "",
       Array.isArray(s.pending) && s.pending.length ? `${s.pending.length} pending` : "",
     ]
       .filter(Boolean)
@@ -274,9 +201,21 @@ function render(report) {
       `  ${ICON[s.status] ?? "?"} ${s.name.padEnd(8)} ${t.padStart(6)}  ${detail}${why}`.trimEnd(),
     )
     if (s.command) lines.push(`      $ ${s.command}`)
+    if (s.diagnostics) {
+      const d = s.diagnostics
+      const codes = Object.entries(d.codes).map(([c, n]) => `${c} ${n}`).join(", ")
+      lines.push(
+        `      ${d.errors} error(s), ${d.warnings} warning(s) in ${d.files.length} file(s)  [${codes}]`,
+      )
+      for (const f of d.files.slice(0, 15)) lines.push(`        ${String(f.count).padStart(4)}  ${f.path}`)
+      if (d.files.length > 15) lines.push(`        ... ${d.files.length - 15} more file(s)`)
+    }
+    if (s.omitted) lines.push(`      ... ${s.omitted} earlier line(s) not shown${logPath ? `; full output in ${logPath}` : ""}`)
     for (const line of s.output ?? []) lines.push(`      ${line}`)
     for (const f of s.findings ?? []) {
-      const where = f.line ? `${f.file ?? ""}:${f.line}` : (f.file ?? "")
+      const where = f.migration
+        ? `${f.migration}${f.line ? `  (script line ${f.line})` : ""}`
+        : f.line ? `${f.file ?? ""}:${f.line}` : (f.file ?? "")
       lines.push(`      ${f.rule}${where ? `  ${where}` : ""}`)
       if (f.sql) lines.push(`        ${f.sql}`)
       else if (f.message) lines.push(`        ${f.message}`)
@@ -286,11 +225,16 @@ function render(report) {
   if (report.plan && !report.rendered) lines.push("", `  plan token: ${report.plan.token}`)
   if (report.checks) {
     for (const [k, v] of Object.entries(report.checks)) {
-      lines.push(`  ${v.startsWith("MISSING") ? "x" : "+"} ${k.padEnd(14)} ${v}`)
+      // MISMATCH is a failure too; it used to render with the same "+" as a pass.
+      const mark = /^(MISSING|MISMATCH)/.test(v) ? "x" : v.startsWith("WARN") ? "!" : "+"
+      lines.push(`  ${mark} ${k.padEnd(14)} ${v}`)
     }
   }
   if (report.pending) {
     lines.push(`  pending: ${report.pending.length ? report.pending.join(", ") : "none"}`)
+  }
+  if (report.dirty) {
+    lines.push("", "  ! the source has uncommitted changes: an image built from it is tagged -dirty and never published")
   }
   lines.push("")
   lines.push(report.ok ? `  ok  (${report.seconds}s)` : `  FAILED  ${report.error ?? ""}`)
@@ -306,32 +250,72 @@ async function main() {
   }
 
   const opts = parseArgs(argv)
+  const yamlText = readShipkitYaml()
 
-  // Escape hatch: straight through to dagger, untouched.
+  const fail = (code, message) => {
+    process.stderr.write(`${message}\n`)
+    process.exit(code)
+  }
+
+  const mod = resolveModule({
+    option: typeof opts.module === "string" ? opts.module : undefined,
+    envVar: process.env.SHIPKIT_MODULE,
+    yamlText,
+    localModule: localModuleName(),
+  })
+
+  // Escape hatch: the rest goes to `dagger call` as-is. Only the module is added, resolved
+  // exactly as for every other command — otherwise the hatch works inside this repository
+  // and nowhere a client would actually need it (#3).
   if (opts.raw) {
-    const child = spawn("dagger", ["call", ...opts.raw], { stdio: "inherit" })
+    if (mod.error && !namesModule(opts.raw)) fail(EXIT.CONFIG, mod.error)
+    const args = rawCallArgs(opts.raw, mod.ref)
+    if (opts.explain) {
+      process.stdout.write(`dagger ${args.join(" ")}\n`)
+      process.exit(EXIT.OK)
+    }
+    const child = spawn("dagger", args, { stdio: "inherit" })
     child.on("error", () => process.exit(EXIT.INFRA))
     child.on("close", (c) => process.exit(c ?? EXIT.INFRA))
     return
   }
 
-  const [cmd, sub] = opts._
-  const args = translate(cmd, sub, opts)
-  const mod = moduleRef(opts)
-  if (args && mod) args.unshift("-m", mod)
-
-  if (args === undefined) {
-    process.stderr.write(`unknown command: ${[cmd, sub].filter(Boolean).join(" ")}\n${USAGE}`)
+  const key = commandKey(opts._)
+  if (!(key in COMMAND_OPTIONS)) {
+    process.stderr.write(`unknown command: ${opts._.join(" ") || "(none)"}\n${USAGE}`)
     process.exit(EXIT.CONFIG)
   }
+  const invalid = validateOptions(key, opts)
+  if (invalid) fail(invalid.code, invalid.message)
+
+  // A deploy builds its migration bundle from the working tree while releasing the image of a
+  // commit. With uncommitted changes the two would be different code (#6).
+  if (key === "deploy" && typeof opts.yes === "string" && workingTreeDirty()) {
+    fail(
+      EXIT.CONFIG,
+      "refusing to deploy from a working tree with uncommitted changes\n" +
+        "  commit or stash them; the migrations would come from files the released image does not contain",
+    )
+  }
+
+  const args = translate(key, opts, {
+    sha: gitSha,
+    branch: gitBranch,
+    migrationBase: () => migrationBase(yamlText),
+    dirty: workingTreeDirty,
+    env: process.env,
+  })
 
   if (args === null) {
-    process.stderr.write(
+    fail(
+      EXIT.CONFIRM,
       "deploy needs either --plan or --yes=<token>\n" +
-        "  run `shipkit deploy --plan`, show the plan, then `shipkit deploy --yes=<token>`\n",
+        "  run `shipkit deploy --plan`, show the plan, then `shipkit deploy --yes=<token>`",
     )
-    process.exit(EXIT.CONFIRM)
   }
+
+  if (mod.error) fail(EXIT.CONFIG, mod.error)
+  if (mod.ref) args.unshift("-m", mod.ref)
 
   if (opts.explain) {
     process.stdout.write(`dagger call ${args.join(" ")}\n`)
@@ -358,8 +342,8 @@ async function main() {
     process.exit(status === 0 ? EXIT.INFRA : EXIT.INFRA)
   }
 
-  record(report)
-  process.stdout.write(opts.json ? JSON.stringify(report, null, 2) + "\n" : render(report) + "\n")
+  const logPath = record(report)
+  process.stdout.write(opts.json ? JSON.stringify(report, null, 2) + "\n" : render(report, logPath) + "\n")
   process.exit(report.exitCode ?? (report.ok ? EXIT.OK : EXIT.GATE))
 }
 

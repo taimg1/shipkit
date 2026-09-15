@@ -16,7 +16,9 @@ import { push as pushImage } from "./core/push.js"
 import { backup as backupProduction, BackupResult } from "./core/backup.js"
 import { migrate as runMigrations } from "./core/migrate.js"
 import { lastApplied } from "./core/history.js"
+import { waitForDatabase } from "./core/postgres-remote.js"
 import {
+  bootDatabase,
   clean as cleanServer,
   currentVersion,
   release as releaseImage,
@@ -24,6 +26,7 @@ import {
 } from "./core/release.js"
 import { verify as verifyHealth } from "./core/verify.js"
 import { buildPlan, renderPlan } from "./core/plan.js"
+import { KamalSsh, checkSsh, parseKamalSsh } from "./core/kamal-config.js"
 import { StackAdapter } from "./adapters/types.js"
 
 /** Config, adapter and environment, resolved once and validated together. */
@@ -43,7 +46,7 @@ async function resolveTarget(source: Directory, env: string) {
 import { noTestsRan, testsFailed } from "./core/gates.js"
 
 const CI_STAGES = ["pre", "build", "test", "db", "push"]
-const DEPLOY_STAGES = ["backup", "migrate", "release", "verify", "rollback", "clean"]
+const DEPLOY_STAGES = ["provision", "backup", "migrate", "release", "verify", "rollback", "clean"]
 
 /**
  * One definition of "the image", used by `ci` and by `image` alike, so that what gets
@@ -254,7 +257,10 @@ export class Shipkit {
    * has gone stale (a new commit, production moved, another migration merged) stops matching
    * rather than being quietly executed (ADR 0009).
    */
-  @func()
+  // Never cached: it reads a server, and Dagger caches function calls by default. A cached
+  // plan describes a production that no longer exists; a cached deploy reports ok without
+  // running (#17).
+  @func({ cache: "never" })
   async deployPlan(
     @argument({ defaultPath: ".", ignore: IGNORE }) source: Directory,
     env = "prod",
@@ -291,7 +297,10 @@ export class Shipkit {
    * Every gate fails closed. `--stage` runs one stage for building and debugging the
    * pipeline; stages that change production still need a plan token, read-only ones do not.
    */
-  @func()
+  // Never cached: it reads a server, and Dagger caches function calls by default. A cached
+  // plan describes a production that no longer exists; a cached deploy reports ok without
+  // running (#17).
+  @func({ cache: "never" })
   async deploy(
     @argument({ defaultPath: ".", ignore: IGNORE }) source: Directory,
     planToken?: string,
@@ -305,6 +314,7 @@ export class Shipkit {
     const r = new ReportBuilder("deploy", sha)
     const tag = `sha-${sha.slice(0, 7)}`
     let previousVersion: string | null = null
+    let plannedProvision: string[] = []
 
     try {
       const { cfg, adapter, target } = await resolveTarget(source, env)
@@ -340,7 +350,18 @@ export class Shipkit {
           )
         }
         previousVersion = plan.currentImageTag
+        plannedProvision = plan.provision
       }
+
+      if (plannedProvision.length > 0) {
+        await r.stage("provision", async () => {
+          if (plannedProvision.some((step) => step.startsWith("boot the database"))) {
+            await bootDatabase(source, target, sshKey, tag, registryToken)
+            await waitForDatabase(target, sshKey)
+          }
+          return withDetail(plannedProvision, { provisioned: plannedProvision })
+        })
+      } else r.skip("provision", "server already provisioned")
 
       let backupResult: BackupResult | null = null
       if (only("backup")) {
@@ -435,7 +456,10 @@ export class Shipkit {
    * nobody has restored from is an assumption, and the day it stops being an assumption is
    * the worst possible day to find out.
    */
-  @func()
+  // Never cached: it reads a server, and Dagger caches function calls by default. A cached
+  // plan describes a production that no longer exists; a cached deploy reports ok without
+  // running (#17).
+  @func({ cache: "never" })
   async backup(
     @argument({ defaultPath: ".", ignore: IGNORE }) source: Directory,
     env = "prod",
@@ -462,7 +486,8 @@ export class Shipkit {
   }
 
   /** Environment and configuration checks, cheapest first. */
-  @func()
+  // Never cached: its checks will read servers (#14, #15), and a cached answer is a past one.
+  @func({ cache: "never" })
   async doctor(
     @argument({ defaultPath: ".", ignore: IGNORE }) source: Directory,
   ): Promise<string> {
@@ -521,6 +546,19 @@ export class Shipkit {
         }
       } catch {
         checks["stackVersion"] = `WARN project directory unreadable; ${cfg.stackVersion} not checked`
+      }
+
+      // The kit and Kamal both SSH to the server; they must agree on how (#15).
+      if (cfg.delivery === "kamal") {
+        let kamal: KamalSsh | null = null
+        try {
+          kamal = parseKamalSsh(await source.file("config/deploy.yml").contents())
+        } catch {
+          // No deploy.yml yet: nothing to cross-check, the root warning still applies.
+        }
+        for (const [name, env] of Object.entries(cfg.environments)) {
+          if (env.host) checks[`ssh ${name}`] = checkSsh(name, env, kamal)
+        }
       }
 
       // Kamal's service name is duplicated between shipkit.yaml and config/deploy.yml.

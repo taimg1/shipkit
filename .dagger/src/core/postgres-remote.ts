@@ -1,0 +1,25 @@
+import { Secret } from "@dagger.io/dagger"
+import { Environment } from "../config.js"
+import { infraError } from "../errors.js"
+import { remoteScript, sshContainer } from "./ssh.js"
+
+/**
+ * Waits until production's database container accepts connections.
+ *
+ * A freshly booted Postgres initialises its data directory before it listens; the backup that
+ * follows would otherwise fail on a database that is merely still starting.
+ */
+export async function waitForDatabase(env: Environment, key: Secret, seconds = 90): Promise<void> {
+  const script =
+    `i=0; while [ $i -lt ${seconds} ]; do ` +
+    `docker exec ${env.dbContainer} pg_isready -U ${env.dbUser} -d ${env.database} >/dev/null 2>&1 && exit 0; ` +
+    `i=$((i+1)); sleep 1; done; exit 1`
+  try {
+    await sshContainer(env, key).withExec(["sh", "-c", remoteScript(env, script)]).sync()
+  } catch {
+    throw infraError(
+      `the database container did not accept connections within ${seconds}s of booting`,
+      `Check \`docker logs ${env.dbContainer}\` on the server.`,
+    )
+  }
+}

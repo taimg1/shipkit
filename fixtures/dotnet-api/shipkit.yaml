@@ -32,6 +32,6 @@ environments:
     url: http://host.docker.internal:8080
     host: host.docker.internal
     sshPort: 2222
-    sshUser: root
+    sshUser: deploy
     database: app
     dbUser: postgres

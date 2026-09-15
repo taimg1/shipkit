@@ -11,7 +11,7 @@ servers:
     - host.docker.internal   # REAL: the server's hostname or IP
 
 ssh:
-  user: root
+  user: deploy
   port: 2222               # REAL: 22
 
 proxy:

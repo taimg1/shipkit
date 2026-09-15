@@ -135,3 +135,22 @@ export async function clean(
     .filter((l) => l.includes("Finished in") && l.includes("successful")).length
   return `${steps} prune step(s) completed`
 }
+
+/**
+ * Boots the database accessory on a server that has never had one — the part of `kamal setup`
+ * a first deploy needs (#13). Only ever runs when the confirmed plan says so.
+ */
+export async function bootDatabase(
+  source: Directory,
+  env: Environment,
+  key: Secret,
+  tag: string,
+  registryPassword?: Secret,
+): Promise<void> {
+  // --version even though an accessory has nothing to do with the app's image: without it Kamal
+  // derives a version from git, and the source it is given has no .git. Every other Kamal call
+  // here already passes it; this one was found missing on the first real first-deploy.
+  await kamal(source, env, key, registryPassword)
+    .withExec(["kamal", "accessory", "boot", "db", "--version", tag])
+    .sync()
+}

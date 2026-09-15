@@ -54,8 +54,12 @@ export interface DbAdapter {
    * the core decides how to reach it.
    */
   readonly historyTable: string
-  /** Column holding the migration id, for the same reason. */
-  readonly historyIdColumn: string
+  /**
+   * Names the id column can have, in order of preference. More than one because naming
+   * conventions rename it (`MigrationId` vs `migration_id`); the core reads which one the
+   * production table actually has rather than assuming (#12).
+   */
+  readonly historyIdColumns: readonly string[]
 
   /**
    * Plain, NON-idempotent SQL for the migrations in `(from, to]`. `null` means the very

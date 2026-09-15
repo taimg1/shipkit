@@ -18,10 +18,10 @@ ssh_opts=(-i "$here/.ssh/id_ed25519" -p 2222
           -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
 
 echo "saving $IMAGE and loading it on the server..."
-docker save "$IMAGE" | ssh "${ssh_opts[@]}" root@localhost "docker load"
+docker save "$IMAGE" | ssh "${ssh_opts[@]}" deploy@localhost "docker load"
 
 echo "pushing $TARGET from the server..."
-ssh "${ssh_opts[@]}" root@localhost \
+ssh "${ssh_opts[@]}" deploy@localhost \
   "docker tag '$IMAGE' '$TARGET' && docker push '$TARGET'" >/dev/null
 
 echo "in the registry: $TARGET"

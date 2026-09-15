@@ -126,11 +126,20 @@ export async function loadConfig(source: Directory): Promise<Config> {
     if (!env || typeof env.url !== "string") {
       throw configError(`environment "${name}" needs a url`)
     }
+    // No silent root: a server that is deployed to over SSH names the user it is deployed as.
+    // Defaulting to root worked on every simulated run and would stop working the day the real
+    // server's root login is disabled (#15).
+    if (env.host !== undefined && typeof env.sshUser !== "string") {
+      throw configError(
+        `environment "${name}" has a host but no sshUser`,
+        'Add sshUser (e.g. "deploy") — the same user as ssh.user in config/deploy.yml.',
+      )
+    }
     environments[name] = {
       url: env.url,
       host: env.host as string | undefined,
       sshPort: Number(env.sshPort ?? 22),
-      sshUser: (env.sshUser as string) ?? "root",
+      sshUser: (env.sshUser as string) ?? "",
       // Kamal names an accessory's container "<service>-<accessory>" and puts it on a
       // network called "kamal". Deriving them keeps two more values out of every config,
       // and either can be overridden when a project does something else.

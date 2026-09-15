@@ -9,6 +9,21 @@ import { currentVersion } from "./release.js"
 import { lastApplied } from "./history.js"
 import { stripBom } from "./sql-scan.js"
 import { servingVersion as servingHealthVersion } from "./verify.js"
+import { EXIT, ShipkitError } from "../errors.js"
+import { ServerState, parseServerProbe, provisioning, serverProbeScript } from "./server-probe.js"
+import { remoteScript, sshContainer } from "./ssh.js"
+
+/** Asks the server what exists on it. An answer the kit cannot read stops the plan. */
+export async function probeServer(cfg: Config, env: Environment, key: Secret): Promise<ServerState> {
+  const out = await sshContainer(env, key)
+    .withExec(["sh", "-c", remoteScript(env, serverProbeScript(cfg.service, env.dbContainer))])
+    .stdout()
+  const probe = parseServerProbe(out)
+  if (!probe.ok) {
+    throw new ShipkitError(EXIT.INFRA, `cannot read the state of the server: ${probe.reason}`)
+  }
+  return probe.state
+}
 
 /**
  * Gathers everything a person needs in order to say yes, from the places that actually know:
@@ -30,13 +45,35 @@ export async function buildPlan(
   registryPassword?: Secret,
 ): Promise<DeployPlan> {
   const imageTag = `sha-${sha.slice(0, 7)}`
-  const currentImageTag = await currentVersion(source, env, key, registryPassword)
+  const needsDb = cfg.db !== "none" && !!adapter.db
+
+  // The server first: everything below reads it, and each read used to turn "could not ask"
+  // into "nothing there" (#13).
+  const server = await probeServer(cfg, env, key)
+  const provision = provisioning(server, needsDb)
+  if (!provision.ok) throw new ShipkitError(EXIT.GATE, provision.reason, provision.next)
+
+  // Nothing of this app has ever run here: there is no version to ask Kamal for. Otherwise Kamal
+  // must answer — a failure to read the current version is not "nothing deployed", and the
+  // current version is the rollback target.
+  let currentImageTag: string | null = null
+  if (server.appContainers > 0) {
+    currentImageTag = await currentVersion(source, env, key, registryPassword)
+    if (currentImageTag === null) {
+      throw new ShipkitError(
+        EXIT.INFRA,
+        "the application has run on this server but Kamal could not say which version is deployed",
+        "Run `kamal app version` against the server and fix what it reports before planning a deploy.",
+      )
+    }
+  }
   const servingVersion = await servingHealthVersion(env, healthPath)
 
   let migrations: string[] = []
   let sqlText = ""
-  if (cfg.db !== "none" && adapter.db) {
-    const from = await lastApplied(env, adapter.db, key)
+  if (needsDb && adapter.db) {
+    // A database that has not been booted yet has no history to read.
+    const from = server.db === "missing" ? null : await lastApplied(env, adapter.db, key)
     migrations = await adapter.db.pendingList(source, cfg, from)
     if (migrations.length > 0) {
       sqlText = stripBom(await adapter.db.sqlBetween(source, cfg, from, null).contents())
@@ -49,6 +86,7 @@ export async function buildPlan(
     imageTag,
     currentImageTag,
     servingVersion,
+    provision: provision.steps,
     migrations,
     sqlDigest: digest(sqlText),
     sqlPreview:

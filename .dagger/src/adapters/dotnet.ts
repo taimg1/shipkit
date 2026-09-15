@@ -84,7 +84,8 @@ export class DotnetAdapter implements StackAdapter {
 
 class EfCoreDb implements DbAdapter {
   readonly historyTable = "__EFMigrationsHistory"
-  readonly historyIdColumn = "MigrationId"
+  // EF's default, then the name EFCore.NamingConventions gives it (snake_case).
+  readonly historyIdColumns = ["MigrationId", "migration_id"] as const
 
   /**
    * SDK container with `dotnet ef` available AND a completed build.

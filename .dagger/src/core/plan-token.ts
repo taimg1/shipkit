@@ -24,6 +24,11 @@ export interface DeployPlan {
    * image at the worst moment.
    */
   servingVersion: string | null
+  /**
+   * What the deploy does to the server before it can deploy — e.g. booting the database on a
+   * first deploy. Part of the token: provisioning production is a change, confirmed like one.
+   */
+  provision: string[]
   migrations: string[]
   sqlDigest: string
   sqlPreview: string
@@ -47,6 +52,7 @@ export function planToken(p: Omit<DeployPlan, "token">): string {
     url: p.url,
     imageTag: p.imageTag,
     currentImageTag: p.currentImageTag,
+    provision: p.provision,
     migrations: p.migrations,
     sqlDigest: p.sqlDigest,
   })
@@ -64,7 +70,8 @@ export function renderPlan(p: DeployPlan): string {
 
   const lines = [
     `  target      ${p.env}  (${p.url})`,
-    `  image       ${p.imageTag}${p.currentImageTag ? `  <-  currently ${p.currentImageTag}` : ""}${drift}`,
+    `  image       ${p.imageTag}${p.currentImageTag ? `  <-  currently ${p.currentImageTag}` : "  (first deploy to this server)"}${drift}`,
+    ...(p.provision.length > 0 ? [`  server      ${p.provision.join("\n              ")}`] : []),
     `  migrations  ${p.migrations.length > 0 ? p.migrations.join("\n              ") : "none"}`,
     `  sql         ${p.sqlPreview}`,
     `  backup      will run first; last verified ${p.lastVerifiedBackup ?? "never"}`,

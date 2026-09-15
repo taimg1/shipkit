@@ -7,6 +7,8 @@ const base = {
   url: "https://api.client.com",
   imageTag: "sha-a1b2c3d",
   currentImageTag: "sha-9f8e7d6",
+  servingVersion: null,
+  provision: [] as string[],
   migrations: ["20260911_AddOrdersIndex"],
   sqlDigest: "abc123",
   sqlPreview: "12 lines",
@@ -53,6 +55,7 @@ test("what is actually serving does not affect the token", () => {
 test("the token is stable across property order", () => {
   const reordered = {
     sqlDigest: base.sqlDigest,
+    provision: base.provision,
     migrations: base.migrations,
     currentImageTag: base.currentImageTag,
     imageTag: base.imageTag,
@@ -63,4 +66,10 @@ test("the token is stable across property order", () => {
     lastVerifiedBackup: base.lastVerifiedBackup,
   }
   assert.equal(planToken(base), planToken(reordered as never))
+})
+
+test("provisioning the server is part of what the token confirms", () => {
+  // Booting a production database on a first deploy is a change; a token shown for a
+  // server that already had one must not authorise it (#13).
+  assert.notEqual(planToken(base), planToken({ ...base, provision: ["boot the database accessory (first deploy to this server)"] }))
 })

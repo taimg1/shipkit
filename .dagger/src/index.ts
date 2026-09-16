@@ -17,6 +17,10 @@ import { backup as backupProduction, BackupResult } from "./core/backup.js"
 import { migrate as runMigrations } from "./core/migrate.js"
 import { lastApplied } from "./core/history.js"
 import { dockerPlatform, SUPPORTED_RIDS } from "./core/platform.js"
+import { versionMatchesTag } from "./core/health.js"
+import { parseVersionProbe, versionProbeScript } from "./core/server-probe.js"
+import { remoteScript, sshContainer } from "./core/ssh.js"
+import { servingVersion as servingHealth } from "./core/verify.js"
 import { waitForDatabase } from "./core/postgres-remote.js"
 import {
   bootDatabase,
@@ -526,6 +530,101 @@ export class Shipkit {
       )
     }
     return dump
+  }
+
+  /**
+   * Put a version that was already deployed back in front of traffic.
+   *
+   * The runbook has described this command since M6 and it did not exist (#11): the only
+   * rollback the kit could perform was the automatic one inside a deploy, when `verify` failed.
+   * Which is the easy case. The hard case is finding out an hour later, and that had nothing.
+   *
+   * Schema is not touched. Migrations roll forward (ADR 0005), and a release that has to be
+   * undone because of a migration is the restore runbook's problem, not this one's. The command
+   * says so rather than pretending otherwise.
+   *
+   * The target is named explicitly and never inferred. "The previous one" is exactly the thing
+   * an operator is least sure of during an incident, and a rollback to a guess is another
+   * deploy nobody confirmed.
+   */
+  // Never cached: it reads the server and changes it (#17).
+  @func({ cache: "never" })
+  async rollback(
+    @argument({ defaultPath: ".", ignore: IGNORE }) source: Directory,
+    /** The image tag to put back, as `ci` published it: sha-a1b2c3d. */
+    toVersion: string,
+    env = "prod",
+    sshKey?: Secret,
+    registryToken?: Secret,
+    kamalSecrets?: Secret,
+  ): Promise<string> {
+    const r = new ReportBuilder("rollback", toVersion)
+    try {
+      const { cfg, target } = await resolveTarget(source, env)
+      if (!sshKey) {
+        throw new ShipkitError(EXIT.CONFIG, "no ssh key", "Set SHIPKIT_SSH_KEY or pass --ssh-key.")
+      }
+      if (!/^sha-[0-9a-f]{7,40}$/.test(toVersion)) {
+        throw new ShipkitError(
+          EXIT.CONFIG,
+          `"${toVersion}" is not a tag this pipeline published`,
+          "Tags are sha-<short commit>. `shipkit deploy --plan` shows the one currently serving.",
+        )
+      }
+
+      const before = await servingHealth(target, cfg.health)
+      r.set("serving", before ?? "nothing is answering")
+
+      // Rolling back to what is already serving changes nothing and looks like a fix, which is
+      // the worst outcome during an incident.
+      if (versionMatchesTag(before, toVersion)) {
+        throw new ShipkitError(
+          EXIT.GATE,
+          `${toVersion} is already what is serving`,
+          "Nothing to roll back to. If the site is wrong, this is not the reason.",
+        )
+      }
+
+      // `kamal rollback` over a pruned image exits 0 and changes nothing, and the deploy's own
+      // clean stage is what prunes it. Asked here so the refusal names the real reason instead
+      // of arriving as a failed verify (#11).
+      const imageRef = `${cfg.registry}:${toVersion}`
+      const present = parseVersionProbe(
+        await sshContainer(target, sshKey)
+          .withExec(["sh", "-c", remoteScript(target, versionProbeScript(imageRef))])
+          .stdout(),
+      )
+      if (!present) {
+        throw new ShipkitError(
+          EXIT.GATE,
+          `${toVersion} is not on the server any more`,
+          "The deploy's clean stage prunes old images, so it is no longer there to roll back to. " +
+            "Deploy that commit again instead — it is still in the registry.",
+        )
+      }
+
+      await r.stage("rollback", async () => {
+        await rollbackTo(source, target, sshKey, toVersion, registryToken, kamalSecrets)
+        return toVersion
+      })
+
+      await r.stage("verify", async () => {
+        const after = await servingHealth(target, cfg.health)
+        if (!versionMatchesTag(after, toVersion)) {
+          throw new ShipkitError(
+            EXIT.GATE,
+            `rolled back to ${toVersion} but ${after ?? "nothing"} is answering`,
+            "The old version did not take. Check `kamal app version` on the server before trying again.",
+          )
+        }
+        return after!
+      })
+
+      r.set("schema", "untouched — migrations roll forward (docs/runbooks/restore.md)")
+      return serialize(r.success())
+    } catch (err) {
+      return serialize(r.failure(err))
+    }
   }
 
   /** Environment and configuration checks, cheapest first. */

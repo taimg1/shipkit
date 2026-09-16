@@ -67,7 +67,7 @@ export const COMMAND_OPTIONS = {
   "db pending": { "migration-base": "value" },
   deploy: { env: "value", plan: "flag", yes: "value", stage: "value", "ssh-key": "value" },
   backup: { env: "value", out: "value", "ssh-key": "value" },
-  rollback: {},
+  rollback: { env: "value", "ssh-key": "value" },
   doctor: {},
 }
 
@@ -317,8 +317,22 @@ export function translate(key, opts, ctx) {
       }
       return null
     }
-    case "rollback":
-      return ["rollback", ...src, `--sha=${opts._?.[1] ?? ""}`]
+    // #11: this case existed and called a module function that did not. The command was
+    // documented, printed in usage, and did nothing but fail obscurely.
+    //
+    // The target is named, never inferred: "the previous one" is exactly what an operator is
+    // least sure of mid-incident, and rolling back to a guess is another unconfirmed deploy.
+    case "rollback": {
+      const to = opts._?.[1]
+      if (!to) return null
+      return [
+        "rollback",
+        ...src,
+        `--to-version=${to}`,
+        `--env=${opts.env || "prod"}`,
+        ...credentials(opts, ctx.env),
+      ]
+    }
     case "backup": {
       const out = opts.out || "prod-backup.pgc"
       return [

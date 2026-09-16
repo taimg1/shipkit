@@ -328,6 +328,13 @@ async function main() {
   })
 
   if (args === null) {
+    if (key === "rollback") {
+      fail(
+        EXIT.CONFIG,
+        "rollback needs the version to put back\n" +
+          "  shipkit rollback sha-a1b2c3d  — `shipkit deploy --plan` shows what is serving now",
+      )
+    }
     fail(
       EXIT.CONFIRM,
       "deploy needs either --plan or --yes=<token>\n" +

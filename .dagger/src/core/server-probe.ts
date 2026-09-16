@@ -169,3 +169,20 @@ export function provisioning(state: ServerState, needsDb: boolean, building: str
   if (state.proxy !== "running") steps.push("start kamal-proxy (Kamal does this as part of the release)")
   return { ok: true, steps }
 }
+
+/**
+ * Whether a version is still on the server to be rolled back to.
+ *
+ * `kamal rollback` to a version whose image was pruned exits 0 and changes nothing. The deploy's
+ * own `clean` stage is what prunes it, so the pipeline deletes its own rollback targets and then
+ * reports success when asked to use one (#11). Verify catches it afterwards; this catches it
+ * before, which is the difference between a clear refusal and a confusing one mid-incident.
+ */
+export function versionProbeScript(imageRef: string): string {
+  const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
+  return `docker image inspect ${q(imageRef)} >/dev/null 2>&1 && echo image:yes || echo image:no`
+}
+
+export function parseVersionProbe(output: string): boolean {
+  return output.split("\n").some((line) => line.trim() === "image:yes")
+}

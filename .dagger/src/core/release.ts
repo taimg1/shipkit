@@ -20,6 +20,12 @@ export function kamal(
   _env: Environment,
   key: Secret,
   registryPassword?: Secret,
+  /**
+   * The project's .kamal/secrets with its references already resolved. Mounted over whatever
+   * the source carries, because what the source carries is a list of variable names and this
+   * container has none of those variables (#19).
+   */
+  kamalSecrets?: Secret,
 ): Container {
   let c = dag
     .container()
@@ -32,6 +38,9 @@ export function kamal(
 
   if (registryPassword) {
     c = c.withSecretVariable("KAMAL_REGISTRY_PASSWORD", registryPassword)
+  }
+  if (kamalSecrets) {
+    c = c.withMountedSecret("/workdir/.kamal/secrets", kamalSecrets)
   }
   return c
 }
@@ -47,8 +56,9 @@ export async function currentVersion(
   env: Environment,
   key: Secret,
   registryPassword?: Secret,
+  kamalSecrets?: Secret,
 ): Promise<string | null> {
-  const out = await kamal(source, env, key, registryPassword)
+  const out = await kamal(source, env, key, registryPassword, kamalSecrets)
     .withExec(["kamal", "app", "version"], { expect: "ANY" as never })
     .stdout()
 
@@ -69,8 +79,9 @@ export async function release(
   key: Secret,
   tag: string,
   registryPassword?: Secret,
+  kamalSecrets?: Secret,
 ): Promise<void> {
-  await kamal(source, env, key, registryPassword)
+  await kamal(source, env, key, registryPassword, kamalSecrets)
     // --skip-push: `ci` published this image already. Rebuilding here would produce a
     // different artifact from the one the gates were run against.
     .withExec(["kamal", "deploy", "--version", tag, "--skip-push"])
@@ -90,6 +101,7 @@ export async function rollback(
   key: Secret,
   toTag: string,
   registryPassword?: Secret,
+  kamalSecrets?: Secret,
 ): Promise<void> {
   if (!toTag) {
     throw infraError(
@@ -106,7 +118,7 @@ export async function rollback(
   //
   // A recovery path that has never been executed is not a recovery path. This one was broken
   // from the day it was written and looked fine.
-  await kamal(source, env, key, registryPassword)
+  await kamal(source, env, key, registryPassword, kamalSecrets)
     .withExec(["kamal", "rollback", toTag, "--version", toTag])
     .sync()
 }
@@ -125,8 +137,9 @@ export async function clean(
   key: Secret,
   tag: string,
   registryPassword?: Secret,
+  kamalSecrets?: Secret,
 ): Promise<string> {
-  const out = await kamal(source, env, key, registryPassword)
+  const out = await kamal(source, env, key, registryPassword, kamalSecrets)
     .withExec(["kamal", "prune", "all", "--version", tag])
     .stdout()
 
@@ -146,11 +159,12 @@ export async function bootDatabase(
   key: Secret,
   tag: string,
   registryPassword?: Secret,
+  kamalSecrets?: Secret,
 ): Promise<void> {
   // --version even though an accessory has nothing to do with the app's image: without it Kamal
   // derives a version from git, and the source it is given has no .git. Every other Kamal call
   // here already passes it; this one was found missing on the first real first-deploy.
-  await kamal(source, env, key, registryPassword)
+  await kamal(source, env, key, registryPassword, kamalSecrets)
     .withExec(["kamal", "accessory", "boot", "db", "--version", tag])
     .sync()
 }

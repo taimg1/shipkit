@@ -190,9 +190,61 @@ export function isDirty(porcelain) {
     .some((path) => !/(^|\/)\.shipkit(\/|$)/.test(path.split(" -> ").pop()))
 }
 
+/**
+ * Kamal reads `.kamal/secrets`, a file of `NAME=value` lines where a value may be `$VAR`, taken
+ * from the environment Kamal runs in. The kit runs Kamal inside a container that has none of
+ * those variables, so every reference resolved to an empty string and the deploy carried on
+ * with it (#19).
+ *
+ * This expands the references here, where the environment actually is, so the container receives
+ * values rather than names. The file itself stays as the project wrote it: references, no values,
+ * safe to commit — though it is gitignored anyway, and should stay that way.
+ *
+ * A reference with nothing behind it is refused rather than expanded to nothing. That is the
+ * whole point: an empty secret is how a deploy gets to production and misbehaves there.
+ */
+export function expandSecretsFile(text, env) {
+  const missing = []
+  const lines = []
+
+  for (const raw of text.split("\n")) {
+    const line = raw.replace(/\s+$/, "")
+    const pair = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line)
+    if (line.trim().length === 0 || line.trimStart().startsWith("#") || !pair) {
+      lines.push(line)
+      continue
+    }
+
+    const [, name, value] = pair
+    const reference = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(value.trim())
+    // A literal value is the project's business; only references are ours to resolve.
+    if (!reference) {
+      lines.push(line)
+      continue
+    }
+
+    // The kit injects this one into Kamal's container itself, as a Dagger secret. Resolving it
+    // here would copy the registry token into a file for no reason.
+    if (reference[1] === "KAMAL_REGISTRY_PASSWORD") {
+      lines.push(line)
+      continue
+    }
+
+    const resolved = env[reference[1]]
+    if (resolved === undefined || resolved === "") {
+      missing.push(reference[1])
+      continue
+    }
+    lines.push(`${name}=${resolved}`)
+  }
+
+  return missing.length > 0 ? { missing } : { content: lines.join("\n").replace(/\n+$/, "") + "\n" }
+}
+
 const REGISTRY_TOKEN_VAR = "SHIPKIT_REGISTRY_TOKEN"
 const SSH_KEY_VAR = "SHIPKIT_SSH_KEY"
 const DB_URL_VAR = "SHIPKIT_DATABASE_URL"
+const KAMAL_SECRETS_VAR = "SHIPKIT_KAMAL_SECRETS"
 
 /**
  * Credentials, passed by reference.
@@ -209,6 +261,8 @@ function credentials(opts, env, { dbUrl = false } = {}) {
   // that has no such parameter is an error, not a harmless extra.
   if (dbUrl && env[DB_URL_VAR]) args.push(`--db-url=env:${DB_URL_VAR}`)
   if (env[REGISTRY_TOKEN_VAR]) args.push(`--registry-token=env:${REGISTRY_TOKEN_VAR}`)
+  // Set by the wrapper from the project's .kamal/secrets, with its references resolved (#19).
+  if (env[KAMAL_SECRETS_VAR]) args.push(`--kamal-secrets=env:${KAMAL_SECRETS_VAR}`)
   return args
 }
 

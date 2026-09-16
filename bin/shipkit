@@ -19,6 +19,7 @@ import {
   COMMAND_OPTIONS,
   EXIT,
   commandKey,
+  expandSecretsFile,
   isDirty,
   namesModule,
   newestMigrationId,
@@ -296,6 +297,26 @@ async function main() {
       "refusing to deploy from a working tree with uncommitted changes\n" +
         "  commit or stash them; the migrations would come from files the released image does not contain",
     )
+  }
+
+  // Kamal reads .kamal/secrets, whose values are references to environment variables — and the
+  // container the kit runs Kamal in has none of them, so every reference used to resolve to an
+  // empty string and deploy as one (#19). Resolved here, where the environment is, and refused
+  // here when something has nothing behind it: before the server is touched, not after the
+  // database accessory has booted without a password.
+  if (key === "deploy" && typeof opts.yes === "string") {
+    const secretsPath = join(".kamal", "secrets")
+    if (existsSync(secretsPath)) {
+      const resolved = expandSecretsFile(readFileSync(secretsPath, "utf8"), process.env)
+      if (resolved.missing) {
+        fail(
+          EXIT.CONFIG,
+          `.kamal/secrets refers to variables with no value: ${resolved.missing.join(", ")}\n` +
+            "  export them where the deploy runs; an empty secret deploys and misbehaves in production",
+        )
+      }
+      process.env.SHIPKIT_KAMAL_SECRETS = resolved.content
+    }
   }
 
   const args = translate(key, opts, {

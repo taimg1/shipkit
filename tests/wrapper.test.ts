@@ -2,10 +2,11 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import {
   commandKey,
+  expandSecretsFile,
   isDirty,
+  newestMigrationId,
   parseArgs,
   parseDefaultBranch,
-  newestMigrationId,
   parseKitRef,
   rawCallArgs,
   resolveModule,
@@ -213,4 +214,51 @@ test("a renamed file counts by its new path", () => {
 test("ci tells the module when the tree is dirty", () => {
   assert.ok(argsFor(["ci"], ctx({ dirty: () => true })).args.includes("--dirty"))
   assert.ok(!argsFor(["ci"]).args.includes("--dirty"))
+})
+
+// #19: Kamal's own secrets file holds references to environment variables, and the container the
+// kit runs Kamal in has none of them. Every reference resolved to empty and the deploy continued.
+test("resolves the references in .kamal/secrets from the environment", () => {
+  const file = "POSTGRES_PASSWORD=$POSTGRES_PASSWORD\nConnectionStrings__Default=$ConnectionStrings__Default\n"
+  const r = expandSecretsFile(file, {
+    POSTGRES_PASSWORD: "s3cret",
+    ConnectionStrings__Default: "Host=db;Password=s3cret",
+  })
+  assert.equal(r.missing, undefined)
+  assert.equal(r.content, "POSTGRES_PASSWORD=s3cret\nConnectionStrings__Default=Host=db;Password=s3cret\n")
+})
+
+// The failure this exists to prevent: an empty value is not a value.
+test("a reference with nothing behind it is refused, not expanded to nothing", () => {
+  const r = expandSecretsFile("POSTGRES_PASSWORD=$POSTGRES_PASSWORD\nOTHER=$OTHER\n", { OTHER: "x" })
+  assert.deepEqual(r.missing, ["POSTGRES_PASSWORD"])
+  assert.equal(r.content, undefined)
+})
+
+test("an empty string counts as missing", () => {
+  assert.deepEqual(expandSecretsFile("A=$A\n", { A: "" }).missing, ["A"])
+})
+
+test("every missing name is named, not just the first", () => {
+  assert.deepEqual(expandSecretsFile("A=$A\nB=$B\n", {}).missing, ["A", "B"])
+})
+
+// The kit injects this one as a Dagger secret; resolving it here would copy the registry token
+// into a file for no reason.
+test("the registry password stays a reference", () => {
+  const r = expandSecretsFile("KAMAL_REGISTRY_PASSWORD=$KAMAL_REGISTRY_PASSWORD\n", {})
+  assert.equal(r.missing, undefined)
+  assert.match(r.content, /^KAMAL_REGISTRY_PASSWORD=\$KAMAL_REGISTRY_PASSWORD$/m)
+})
+
+test("comments, blank lines and literal values are left alone", () => {
+  const file = "# a note\n\nLITERAL=kept-as-is\nREF=$REF\n"
+  const r = expandSecretsFile(file, { REF: "resolved" })
+  assert.match(r.content, /^# a note$/m)
+  assert.match(r.content, /^LITERAL=kept-as-is$/m)
+  assert.match(r.content, /^REF=resolved$/m)
+})
+
+test("${BRACED} references resolve too", () => {
+  assert.equal(expandSecretsFile("A=${A}\n", { A: "v" }).content, "A=v\n")
 })

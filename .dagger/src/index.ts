@@ -27,7 +27,7 @@ import {
 } from "./core/release.js"
 import { verify as verifyHealth } from "./core/verify.js"
 import { buildPlan, renderPlan } from "./core/plan.js"
-import { KamalSsh, checkSsh, parseKamalSsh } from "./core/kamal-config.js"
+import { KamalSsh, checkSsh, declaredSecrets, missingSecrets, parseKamalSsh } from "./core/kamal-config.js"
 import { StackAdapter } from "./adapters/types.js"
 
 /** Config, adapter and environment, resolved once and validated together. */
@@ -322,6 +322,12 @@ export class Shipkit {
     sshKey?: Secret,
     dbUrl?: Secret,
     registryToken?: Secret,
+    /**
+     * The project's .kamal/secrets with its references resolved by the wrapper. Without it the
+     * container running Kamal has no values for anything the project declares as a secret, and
+     * Kamal deploys an empty string in their place (#19).
+     */
+    kamalSecrets?: Secret,
   ): Promise<string> {
     const r = new ReportBuilder("deploy", sha)
     const tag = `sha-${sha.slice(0, 7)}`
@@ -352,7 +358,32 @@ export class Shipkit {
         // The plan is rebuilt from production as it is NOW. If anything it described has
         // changed since it was shown, the token no longer matches and this stops — which is
         // the entire point of hashing the plan rather than passing a boolean.
-        const plan = await buildPlan(source, cfg, env, target, adapter, sha, sshKey, cfg.health, registryToken)
+        // Before anything is planned, let alone booted: every secret config/deploy.yml declares
+      // must have a value. Kamal resolves a name it cannot find to an empty string and deploys
+      // it, and only PostgreSQL is rude enough to refuse to start over one (#19).
+      if (cfg.delivery === "kamal") {
+        let deployYml: string | null = null
+        try {
+          deployYml = await source.file("config/deploy.yml").contents()
+        } catch {
+          // No deploy.yml: Kamal would fail on its own, with its own message.
+        }
+        if (deployYml) {
+          const declared = declaredSecrets(deployYml)
+          const provided = kamalSecrets ? await kamalSecrets.plaintext() : ""
+          const absent = missingSecrets(declared, provided)
+          if (absent.length > 0) {
+            throw new ShipkitError(
+              EXIT.CONFIG,
+              `config/deploy.yml declares secrets with no value: ${absent.join(", ")}`,
+              "Export them where the deploy runs, and list them in .kamal/secrets as " +
+                "NAME=$NAME. A secret that resolves to nothing is deployed as nothing.",
+            )
+          }
+        }
+      }
+
+      const plan = await buildPlan(source, cfg, env, target, adapter, sha, sshKey, cfg.health, registryToken)
         r.set("plan", plan)
         if (plan.token !== planToken) {
           throw new ShipkitError(
@@ -368,7 +399,7 @@ export class Shipkit {
       if (plannedProvision.length > 0) {
         await r.stage("provision", async () => {
           if (plannedProvision.some((step) => step.startsWith("boot the database"))) {
-            await bootDatabase(source, target, sshKey, tag, registryToken)
+            await bootDatabase(source, target, sshKey, tag, registryToken, kamalSecrets)
             await waitForDatabase(target, sshKey)
           }
           return withDetail(plannedProvision, { provisioned: plannedProvision })
@@ -407,9 +438,9 @@ export class Shipkit {
       if (only("release")) {
         await r.stage("release", async () => {
           if (previousVersion === null) {
-            previousVersion = await currentVersion(source, target, sshKey, registryToken)
+            previousVersion = await currentVersion(source, target, sshKey, registryToken, kamalSecrets)
           }
-          await releaseImage(source, target, sshKey, tag, registryToken)
+          await releaseImage(source, target, sshKey, tag, registryToken, kamalSecrets)
           return withDetail(tag, { released: tag, previous: previousVersion })
         })
       } else r.skip("release", "not selected")
@@ -426,7 +457,7 @@ export class Shipkit {
           // roll forward, and the backup exists for the other case (ADR 0005).
           if (previousVersion) {
             await r.stage("rollback", async () => {
-              await rollbackTo(source, target, sshKey, previousVersion!, registryToken)
+              await rollbackTo(source, target, sshKey, previousVersion!, registryToken, kamalSecrets)
               return withDetail(previousVersion!, {
                 rolledBackTo: previousVersion,
                 note: "the database was not rolled back; migrations roll forward",
@@ -443,7 +474,7 @@ export class Shipkit {
 
       if (only("clean")) {
         await r.stage("clean", async () => {
-          const summary = await cleanServer(source, target, sshKey, tag, registryToken)
+          const summary = await cleanServer(source, target, sshKey, tag, registryToken, kamalSecrets)
           return withDetail(summary, { pruned: summary })
         })
       } else r.skip("clean", "not selected")

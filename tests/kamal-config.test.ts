@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { checkSsh, parseKamalSsh } from "../.dagger/src/core/kamal-config.ts"
+import { checkSsh, declaredSecrets, missingSecrets, parseKamalSsh } from "../.dagger/src/core/kamal-config.ts"
 
 test("reads ssh user and port from deploy.yml", () => {
   const yml = `service: app\nssh:\n  user: deploy\n  port: 2222   # dev-server\nproxy:\n  ssl: false\n`
@@ -40,4 +40,81 @@ test("a deploy user that matches is ok", () => {
 test("without deploy.yml the settings are still checked for root", () => {
   assert.match(checkSsh("prod", { sshUser: "root", sshPort: 22 }, null), /^WARN/)
   assert.match(checkSsh("prod", { sshUser: "deploy", sshPort: 22 }, null), /^ok/)
+})
+
+// #19: only KAMAL_REGISTRY_PASSWORD ever reached Kamal, so every other declared secret resolved
+// to an empty string and the deploy carried on with it.
+test("collects the secrets the app declares", () => {
+  const yml = [
+    "service: app",
+    "env:",
+    "  clear:",
+    "    ASPNETCORE_ENVIRONMENT: Production",
+    "  secret:",
+    "    - ConnectionStrings__Default",
+    "    - Telegram__BotToken",
+    "volumes:",
+    "  - data:/data",
+  ].join("\n")
+  assert.deepEqual(declaredSecrets(yml), ["ConnectionStrings__Default", "Telegram__BotToken"])
+})
+
+// An accessory's database password is exactly the one that was empty on the first real deploy.
+test("collects an accessory's secrets too", () => {
+  const yml = [
+    "env:",
+    "  secret:",
+    "    - ConnectionStrings__Default",
+    "accessories:",
+    "  db:",
+    "    image: postgres:17-alpine",
+    "    env:",
+    "      clear:",
+    "        POSTGRES_USER: app",
+    "      secret:",
+    "        - POSTGRES_PASSWORD",
+  ].join("\n")
+  assert.deepEqual(declaredSecrets(yml).sort(), ["ConnectionStrings__Default", "POSTGRES_PASSWORD"])
+})
+
+test("a name declared in both places is asked for once", () => {
+  const yml = "env:\n  secret:\n    - SHARED\naccessories:\n  db:\n    env:\n      secret:\n        - SHARED\n"
+  assert.deepEqual(declaredSecrets(yml), ["SHARED"])
+})
+
+test("comments and quotes do not become secret names", () => {
+  const yml = 'env:\n  secret:   # only what exists\n    - "QUOTED"\n    - PLAIN   # trailing\n'
+  assert.deepEqual(declaredSecrets(yml), ["QUOTED", "PLAIN"])
+})
+
+test("a list that ends returns to ignoring what follows", () => {
+  const yml = "env:\n  secret:\n    - ONE\nvolumes:\n  - data:/data\nservers:\n  web:\n    - 1.2.3.4\n"
+  assert.deepEqual(declaredSecrets(yml), ["ONE"])
+})
+
+test("nothing declared is not an error", () => {
+  assert.deepEqual(declaredSecrets("service: app\nservers:\n  web:\n    - 1.2.3.4\n"), [])
+})
+
+test("a declared secret the file does not provide is named", () => {
+  const file = "ConnectionStrings__Default=Host=db\n"
+  assert.deepEqual(missingSecrets(["ConnectionStrings__Default", "POSTGRES_PASSWORD"], file), [
+    "POSTGRES_PASSWORD",
+  ])
+})
+
+// The exact shape that deployed an empty password to production: the name was there, the value
+// was still the reference nobody had resolved.
+test("an unresolved reference counts as missing, not as provided", () => {
+  assert.deepEqual(missingSecrets(["POSTGRES_PASSWORD"], "POSTGRES_PASSWORD=$POSTGRES_PASSWORD\n"), [
+    "POSTGRES_PASSWORD",
+  ])
+})
+
+test("an empty value counts as missing", () => {
+  assert.deepEqual(missingSecrets(["A"], "A=\n"), ["A"])
+})
+
+test("everything provided is nothing missing", () => {
+  assert.deepEqual(missingSecrets(["A", "B"], "A=1\nB=2\n"), [])
 })

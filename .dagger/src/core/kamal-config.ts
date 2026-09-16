@@ -57,3 +57,64 @@ export function checkSsh(envName: string, env: { sshUser: string; sshPort: numbe
   }
   return `ok (${envName}: ${env.sshUser}@:${env.sshPort}${kamal ? ", matches config/deploy.yml" : ""})`
 }
+
+/**
+ * Every name the project declares as a secret in config/deploy.yml — under `env.secret` and
+ * under each accessory's.
+ *
+ * Kamal resolves these from `.kamal/secrets`, a file of `NAME=value` lines. The kit used to
+ * inject only KAMAL_REGISTRY_PASSWORD into the container it runs Kamal in, so every other name
+ * resolved to nothing and Kamal carried on with an empty value (#19). PostgreSQL happened to
+ * refuse to initialise without a password, which is the only reason that failed loudly; a
+ * connection string or an API key would have deployed green and misbehaved in production.
+ *
+ * Read line by line rather than with a YAML parser, and deliberately without caring which block
+ * a name came from: the answer is the set of names that must have values, and a name under an
+ * accessory needs one exactly as much as a name under the app.
+ */
+export function declaredSecrets(deployYml: string): string[] {
+  const names = new Set<string>()
+  // The indentation of the `secret:` key whose list we are currently inside, or null.
+  let listIndent: number | null = null
+
+  for (const raw of deployYml.split("\n")) {
+    const line = raw.replace(/\s+#.*$/, "").replace(/\s+$/, "")
+    if (line.trim().length === 0) continue
+    const indent = line.length - line.trimStart().length
+
+    if (listIndent !== null) {
+      const item = /^\s*-\s*["']?([A-Za-z_][A-Za-z0-9_]*)["']?$/.exec(line)
+      if (item && indent > listIndent) {
+        names.add(item[1])
+        continue
+      }
+      // Anything else ends the list, including a sibling key at the same indentation.
+      listIndent = null
+    }
+
+    if (/^\s*secret:\s*$/.test(line)) listIndent = indent
+  }
+
+  return [...names]
+}
+
+/**
+ * The declared names that the resolved secrets file does not actually provide.
+ *
+ * The wrapper resolves references before the deploy starts, so this should normally be empty —
+ * it is the second lock on the same door. A project can also edit `.kamal/secrets` by hand, or
+ * declare something in deploy.yml and forget to list it, and neither of those should be found
+ * out by a container that has already booted.
+ */
+export function missingSecrets(declared: readonly string[], secretsFile: string): string[] {
+  const provided = new Map<string, string>()
+  for (const raw of secretsFile.split("\n")) {
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(raw.replace(/\s+$/, ""))
+    if (m) provided.set(m[1], m[2].trim())
+  }
+  return declared.filter((name) => {
+    const value = provided.get(name)
+    // An unresolved reference counts as absent: it is a name, not a value.
+    return value === undefined || value === "" || /^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(value)
+  })
+}

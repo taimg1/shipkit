@@ -19,6 +19,13 @@ jobs:
           # The full history is needed to resolve the migration diff base against main.
           fetch-depth: 0
 
+      # The fixture's targetArch is linux-arm64, because the server it deploys to is dev-server,
+      # a container on an Apple Silicon Mac. Since #18 the image is built for the architecture it
+      # is meant to run on rather than for whatever built it — and these runners are x86. Without
+      # binfmt handlers the .NET SDK crashes inside the emulated build with NuGet errors that say
+      # nothing about architecture.
+      - uses: docker/setup-qemu-action@v3
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22

@@ -4,6 +4,7 @@ Written to be read when something is wrong, by someone who did not build this.
 
 | Runbook | When |
 |---|---|
+| [server-bootstrap](server-bootstrap.md) | a new server, before the first deploy |
 | [deploy](deploy.md) | shipping a change |
 | [rollback](rollback.md) | the change was wrong and the gates let it through |
 | [restore](restore.md) | the database needs to come back — includes the drill and its date |

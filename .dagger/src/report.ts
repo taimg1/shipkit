@@ -1,4 +1,5 @@
 import { EXIT, ExitCode, ShipkitError } from "./errors.js"
+import { OutputSummary, summarizeOutput } from "./core/output.js"
 
 /**
  * Dagger's ExecError carries the failing command and both output streams. Without pulling
@@ -23,28 +24,15 @@ export function execOutput(err: unknown): string | null {
   return isExecError(err) ? `${err.stdout}\n${err.stderr}` : null
 }
 
-/** Lines that actually say what went wrong, preferred over surrounding build chatter. */
-const INTERESTING = /\b(error|failed|Failed!|Unhandled exception|warning as error)\b/i
-
-export function describeExec(err: unknown, maxLines = 20): {
+export function describeExec(err: unknown, maxLines = 20): ({
   command?: string
   exitCode?: number
-  output?: string[]
-} | null {
+} & OutputSummary) | null {
   if (!isExecError(err)) return null
-
-  const all = `${err.stderr}\n${err.stdout}`
-    .split("\n")
-    .map((l) => l.trimEnd())
-    .filter((l) => l.trim().length > 0)
-
-  const interesting = all.filter((l) => INTERESTING.test(l))
-  const chosen = interesting.length > 0 ? interesting : all
-
   return {
     command: err.cmd?.join(" "),
     exitCode: err.exitCode,
-    output: chosen.slice(-maxLines),
+    ...summarizeOutput(err.stdout, err.stderr, maxLines),
   }
 }
 
@@ -52,6 +40,8 @@ export type StageStatus = "ok" | "failed" | "skipped"
 
 export interface Finding {
   rule: string
+  /** The migration the finding belongs to, when the SQL came from several. */
+  migration?: string
   file?: string
   line?: number
   sql?: string
@@ -119,6 +109,7 @@ export class ReportBuilder {
       if (err instanceof ShipkitError) {
         entry.gate = err.code === EXIT.GATE ? name : undefined
         entry.reason = err.message
+        if (err.detail) Object.assign(entry, err.detail)
         const findings = (err as { findings?: Finding[] }).findings
         if (findings) entry.findings = findings
       } else {

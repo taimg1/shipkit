@@ -4,8 +4,9 @@ set -e
 
 # The authorized key is mounted in; copy rather than symlink so sshd's permission checks pass.
 if [ -f /keys/authorized_keys ]; then
-  cp /keys/authorized_keys /root/.ssh/authorized_keys
-  chmod 600 /root/.ssh/authorized_keys
+  cp /keys/authorized_keys /home/deploy/.ssh/authorized_keys
+  chown deploy:deploy /home/deploy/.ssh/authorized_keys
+  chmod 600 /home/deploy/.ssh/authorized_keys
 fi
 
 # dind's own entrypoint starts dockerd and daemonises nothing, so run it in the background
@@ -22,6 +23,10 @@ if ! docker info >/dev/null 2>&1; then
   tail -20 /var/log/dockerd.log >&2
   exit 1
 fi
+
+# dockerd creates its socket owned by the docker group only if that group existed when it
+# started; make sure the deploy user can reach it either way.
+chgrp docker /var/run/docker.sock && chmod 660 /var/run/docker.sock
 
 echo "docker is up; starting sshd"
 exec /usr/sbin/sshd -D -e

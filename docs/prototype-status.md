@@ -1,236 +1,222 @@
-# Prototype status — what is verified and what is a guess
+# v1 plan — the stable version
 
-Written 2026-09-12; updated the same day after installing Dagger v0.21.9 and running M0
-against a real engine.
+> `ci-cd-plan.md` says *why*. `multi-stack-plan.md` says *later*. This document says
+> *what gets built now, in what order, and what "done" means for each step*.
 
-**M0 through M4 are verified, with one honest gap in M4** (see below). The module loads on a real engine, the fixture builds and
-serves its SHA, `pre`/`build`/`test` run as Dagger stages, and the `db` gate has been driven
-through seven scenarios — index, rename, destructive rewrite, waivers correct and incorrect —
-each with the observed result recorded in `docs/runbooks/m3-db-gate-scenarios.md`.
+## Scope
 
-The assumption the whole linting gate rested on has now been measured, and it held: Squawk
-reports **nothing at all** for a column-dropping migration when that migration is wrapped in
-`DO $EF$` blocks. Linting the non-idempotent script is not a preference.
+**v1 is:** one .NET + EF Core + PostgreSQL project goes from `git push` to production on a
+bare server, with every gate from ADR 0004 in place and proven to fail closed, a verified
+off-server backup, and an automatic rollback that has been seen to fire.
 
-This document exists so that the next session does not mistake "written" for "working".
+**v1 is not:** NestJS, Next.js, the `custom` adapter, `shipkit init`, templates, IaC,
+monorepos. The `StackAdapter` seam exists in the code (it is cheap and §8 of the
+multi-stack plan is enforced in review), but it has exactly one implementation.
 
-## Verified
+"Stable" means: the fixture project in this repo has been deployed, broken on purpose in
+each of the four gate scenarios, and recovered — and each of those runs is recorded in
+`docs/runbooks/`. Not "the code looks finished".
 
-Actually executed, with output observed:
+---
 
-| What | How |
-|---|---|
-| All 12 TypeScript files parse | `node --experimental-strip-types --check` on each |
-| `scanDestructive` / `parseSquawk` behaviour | 9 unit tests, `npm test` — 15/15 pass |
-| `planToken` invalidation rules | 6 unit tests: new commit, prod moved, extra migration, changed SQL all invalidate; cosmetic fields do not |
-| CLI `--help`, `--explain`, unknown command | run; `--explain ci` prints `dagger call ci --source=. --sha=…` |
-| CLI exit codes 2, 3, 4 | `frobnicate` → 2, `ci` without dagger → 3, `deploy` without flags → 4 |
-| **M0 done #1**: the module loads and exposes its functions | `dagger functions` lists ci, db-lint, db-pending, deploy, deploy-plan, doctor — JSDoc became the descriptions |
-| **M0 done #2**: a missing config fails as a message, not a trace | `shipkit doctor` with no shipkit.yaml → *"shipkit.yaml not found"*, exit 2 |
-| `doctor` happy path | valid config → all checks ok, exit 0 |
-| `doctor` catches a missing Dockerfile | → `MISSING (Dockerfile)`, exit 2 |
-| `doctor` rejects an unknown stack | `stack: rails` → *unknown stack "rails"*, `next: Supported: dotnet, nest, next, custom`, exit 2 |
-| `--raw` escape hatch | `shipkit --raw doctor --source=…` passed straight through to `dagger call` |
-| `doctor` against the real fixture | all checks ok, exit 0 |
-| **M1 done #1**: `dotnet test` passes via Testcontainers | 3 tests, real PostgreSQL 17 |
-| **M1 done #2**: compose serves the baked SHA | `GIT_SHA=a1b2c3d4e5f6` → `{"status":"ok","version":"a1b2c3d4e5f6"}` |
-| Container HEALTHCHECK reaches healthy | `docker compose ps` → `Up 25 seconds (healthy)` |
-| No migration at startup | `/orders` → 500 before `database update`, 200 after; `/health` 200 throughout |
-| `-warnaserror` is a real gate | it failed the build on NU1903 in the template's OpenAPI package |
-| `dotnet ef` multi-project form | `--project src/Infrastructure --startup-project src/Api` works, given Design in the startup project |
-| `migrations list` output parsing | the `^\d{14}_` match separates ids from connection warnings and the trailing note |
-| `migrations script <from>` → HEAD | verified; `0` means "from the beginning" |
-| **M2 done #1**: `pre`, `build`, `test` green in Dagger | `pre` 0.2s cached, `build` tagged `sha-<short>`, `test` 3/3 |
-| **M2 done #2**: format drift fails `pre` | `dotnet format` reported the exact file and column; exit 1 |
-| **M2 done #3**: a failing test fails `test` | reported as `1 of 3 test(s) failed`; exit 1 |
-| **M2 done #4**: `pre` is cached | 97s first run, 0.2s second |
-| The Postgres service binding works | tests reported 3/3, which they could not have done without a database |
-| `source.dockerBuild({ dockerfile, buildArgs })` | verified |
-| The wrapper renders a real run end to end | stage table, tag, test counts, failing command, reason |
-| **M3**: Squawk's image, flag, fields | npm `squawk-cli@2.65.0`; `--reporter json`; fields `rule_name`, `file`, `line`, `level`, `message`, `help` |
-| **M3**: `line` is zero-based | a finding on the first line arrives as 0; the parser now adds 1 |
-| **M3**: the `DO $$` false green | same migration: 3 findings plain, **0** idempotent |
-| **M3**: seven `db` gate scenarios | see `docs/runbooks/m3-db-gate-scenarios.md` |
-| **M3**: apply-to-copy against a seeded database | baseline + 3 seed rows + pending, snapshots compared via `information_schema` |
-| `dag.currentModule().source()` | used to ship the default Squawk config |
-| **M4**: branch gating | `--branch=dev` with `defaultBranch: main` → push skipped, run green |
-| **M4**: `publish: false` | push skipped as a decision, with the reason in the report |
-| **M4**: push needs an image | `--stage=push` alone skips rather than publishing a stale image |
-| **M4**: the publish call itself | reached a real registry: `HEAD /v2/shipkit-fixture/blobs/sha256:…`, address and tag correct |
-| **M4**: unauthenticated push fails usefully | GHCR's token endpoint rejected it; exit 3, `next` says no token was provided |
-| **M4**: the token is passed by reference | `--registry-token=env:SHIPKIT_REGISTRY_TOKEN` — the value never becomes an argument |
-| **M4**: module resolution | no `kit:` → local module; `kit:` → `-m <ref>`; `--module` overrides |
-| `withExec({ expect: ReturnType.Any })` | verified on the Squawk step |
-| Dagger TS SDK API shape | the decorators, `defaultPath`, `ignore`, and the argument forms all compiled and ran |
-| The `yaml` dependency resolves inside the module | config parsing worked at runtime |
+## Decisions taken for v1
 
-**A bug was found this way.** The intent marker (D6) was matched against raw lines, so
-`INSERT INTO notes VALUES ('-- shipkit:destructive-ok')` disabled the destructive-SQL gate
-for the whole script — a fail-open hole reachable by anyone who could write a row of seed
-data. Noise is now stripped before the marker is matched. This is the argument for keeping
-pure logic in `core/sql-scan.ts`, out of reach of Dagger imports: the gate most likely to
-lose client data is the one that must be testable without Docker.
+These were open in `ci-cd-plan.md` §13 or surfaced while planning. Closed here so that
+building can start; each can be revisited with a new ADR.
 
-## Not verified — assumptions that will break first
+| # | Decision | Choice for v1 | Why |
+|---|---|---|---|
+| D1 | What the kit is tested against | A minimal fixture in `fixtures/dotnet-api/` (Web API + EF + one entity + `/health`), **plus** one real project once M4 is green | The fixture makes the kit's own CI possible; the real project is what proves it |
+| D2 | Real Postgres in `test` — Testcontainers or a Dagger service? | **Dagger service** binding, injected as `ConnectionStrings__Test`. The project's test fixture uses that env var when present and falls back to Testcontainers when absent (developer laptop) | Testcontainers inside a Dagger container needs a Docker socket, which breaks isolation and reproducibility. One test fixture, two transports |
+| D3 | Confirmation UX for `deploy` | **Non-interactive.** `deploy --plan` prints target, image, pending migrations, SQL diff and exits 0. `deploy --yes` executes. `deploy` with neither prints the plan and exits non-zero with "re-run with --yes" | Blocking on stdin inside Dagger is awkward and unusable from another program. Same information, no prompt |
+| D4 | Base for the migration diff in `ci` | Last migration id present on `main` (from `git merge-base`). No migrations on `main` yet → full script | Linting every historical migration on every push re-fails old migrations against new rules. Lint what the PR adds |
+| D5 | Where the last-deployed-migration marker lives | **Read back from production `__EFMigrationsHistory`** during `deploy`. No separate store | One fewer thing to keep in sync. Closes a §13 open question |
+| D6 | How a destructive migration is marked intentional | The migration emits `migrationBuilder.Sql("-- shipkit:destructive-ok <reason>")`; the marker lands in the generated SQL and the grep gate honours it | The annotation travels with the SQL, is visible in review, and needs no side file |
+| D7 | Backup verification depth | `pg_dump -Fc`, then: size above threshold **and** `pg_restore --list` succeeds **and** restore into a scratch Postgres service with a table count > 0 | Non-empty is not the same as restorable. The restore is the only real proof |
 
-### Corrected when the engine ran
+Still open, and *needed before M5*: hosting provider; managed vs. containerised Postgres;
+one server per client vs. shared; where Uptime Kuma runs (the existing Proxmox host is the
+obvious candidate). Nothing before M5 depends on them.
 
-Three guesses were wrong, all of them scaffolding rather than logic:
+---
 
-| Guess | Reality |
-|---|---|
-| `engineVersion: v0.18.6` | `v0.21.9` — the installed CLI's version |
-| tsconfig path `./sdk/src/index.ts` | `./sdk/index.ts`, plus a second path for `@dagger.io/dagger/telemetry` |
-| `@dagger.io/dagger: ./sdk` as a dependency in `.dagger/package.json` | `dagger develop` removes it and pins `typescript` instead |
+## Milestones
 
-`dagger develop` rewrites `.dagger/package.json` and `.dagger/tsconfig.json` and generates
-`.gitignore`, `.gitattributes` and `yarn.lock`. Do not hand-maintain those four files.
+Each milestone is independently useful and has a definition of done that is a test, not a
+feeling. Sizes are relative (S/M/L), not dates.
 
-### And one in the wrapper
+### M0 — Module skeleton · S
 
-`shipkit ci` was passing a **git SHA** to `--migration-base`, which expects a **migration id**.
-EF answered "the migration 'aeab9b5…' was not found" — loudly, thankfully. Decision D4 says
-"last migration id present on main, from `git merge-base`", and the wrapper had taken the
-merge-base commit itself. It now reads the migration files present at that commit and takes
-the newest id, which is argument translation — the wrapper's actual job.
+- `dagger init --sdk=typescript` at repo root. Layout:
+  ```
+  .dagger/src/
+    index.ts          # exports ci(), deploy()
+    config.ts         # parse + validate shipkit.yaml; fail loudly if missing
+    core/             # stages that never mention a stack
+      pre.ts build.ts test.ts db.ts push.ts
+      backup.ts migrate.ts release.ts verify.ts rollback.ts clean.ts
+      gates.ts        # the four gates, as functions that throw
+    adapters/
+      types.ts        # StackAdapter, DbAdapter
+      dotnet.ts       # the only implementation in v1
+  ```
+- `shipkit.yaml` schema: `stack`, `db`, `delivery`, `health`, `project` (path to the
+  startup project), `migrationsProject`.
+- **Done when:** `dagger functions` lists `ci` and `deploy`; `dagger call ci --source=.`
+  against an empty dir fails with *"shipkit.yaml not found"*, not a stack trace.
+- **DONE 2026-09-12** on Dagger v0.21.9. See `docs/prototype-status.md`.
 
-### Still unverified
+### M1 — Fixture project and local baseline · S
 
-### A second fail-open found, this time by running things
+- `fixtures/dotnet-api/`: minimal Web API, one `DbContext`, one entity, one migration,
+  `/health` returning `{ "status": "ok", "version": "<sha>" }` where the SHA is a build
+  arg baked in at `dotnet publish` (`-p:InformationalVersion=$GIT_SHA`).
+- Integration test project using the D2 fixture (env var → Dagger service, else Testcontainers).
+- `Dockerfile` (multi-stage: `sdk` → publish → `aspnet` runtime, non-root user, `HEALTHCHECK`).
+- `docker-compose.yml` with app + Postgres on a named volume.
+- **Done when:** `docker compose up` → `curl :8080/health` returns the SHA; `dotnet test`
+  passes locally via Testcontainers.
+- **DONE 2026-09-12.** 3 tests green against PostgreSQL 17 via Testcontainers;
+  `GIT_SHA=a1b2c3d4e5f6` → `{"status":"ok","version":"a1b2c3d4e5f6"}`; container reaches
+  `healthy`. Constraints found while building it are recorded in `fixtures/dotnet-api/README.md`.
 
-`dotnet ef migrations add` does not rebuild. A later `--no-build` command therefore reads a
-stale assembly, finds no migration, and writes a script containing nothing — and an empty
-script passes Squawk, passes the destructive scan, and passes apply-to-copy. Every gate green,
-nothing inspected.
+### M2 — `ci`: `pre` + `build` + `test` · M
 
-Worse, a script with nothing pending is byte-identical to that failure: three bytes of UTF-8
-BOM. The file alone cannot tell the two apart.
+- `pre`: restore with a cache mount; `dotnet format --verify-no-changes`;
+  `dotnet build -warnaserror` so analyzers fail the build.
+- `build`: publish inside the SDK container, produce the runtime image, tag `sha-<short>`.
+  The adapter owns the Dockerfile path; the core owns the tag.
+- `test`: core starts the Postgres service and binds it to the test container as
+  `ConnectionStrings__Test`; adapter runs `dotnet test --no-build`.
+- **Done when:** on the fixture — `dagger call ci` is green; a deliberate format drift →
+  red at `pre`; a deliberately failing test → red at `test`; `pre` is cached on the second
+  run (restore is not repeated).
+- **DONE 2026-09-12.** All four verified. `pre` 97s → 0.2s cached; `build` tags `sha-<short>`;
+  `test` reports 3/3 against a bound Postgres service; format drift and a failing test each
+  fail with exit 1 and a readable reason.
 
-Fixed in two places: the adapter now builds before generating a script, and `dbStage`
-cross-checks the migration list against the SQL — if migrations are pending but the script
-carries no schema change, that contradiction fails closed (`emptyScript` gate).
+### M3 — `ci`: `db` · L (the risky one)
 
-Both fail-opens found so far (this one and the string-literal marker) were in the `db` stage.
-That is the stage that decides whether a client keeps their data.
+- Diff base per D4. Adapter generates the **non-idempotent** script with
+  `dotnet ef migrations script <base> <head>` in an SDK container with `dotnet-ef` installed.
+- Squawk runs as a container on that file. Rule set in `.squawk.toml` in the client repo;
+  the kit ships a recommended one in `fixtures/dotnet-api/.squawk.toml`.
+- Destructive grep gate: `DROP COLUMN` / `DROP TABLE` / `ALTER COLUMN .* TYPE` fail unless
+  the D6 marker is present.
+- Apply-to-copy: fresh Postgres service → apply all `main` migrations → load
+  `ci/seed.sql` if present → apply pending via the **bundle** → assert every table that
+  existed before still exists with row count unchanged, and that every column in the seed
+  is still present. This is the rename-trap test from `ci-cd-plan.md` §7.3, written once in
+  the core against `information_schema`.
+- **Explicit checkpoint, not optional:** add a fixture migration with a plain
+  `CREATE INDEX` and confirm Squawk reports it on the non-idempotent script. Then generate
+  the same migration with `--idempotent` and confirm whether Squawk still sees it. Record
+  the answer in `docs/adr/0003` — this is the false-green risk from §7.2, and until it is
+  observed the gate is theoretical.
+- **Done when:** fixture with plain `CREATE INDEX` → red (Squawk); with
+  `CONCURRENTLY` + `suppressTransaction` → green; a property rename → red (grep gate); the
+  same rename with the D6 marker → red at apply-to-copy because the seed rows lost a column;
+  a rename done properly as `RenameColumn` → green.
+- **DONE 2026-09-12**, with two corrections to the plan itself, both recorded in
+  `docs/runbooks/m3-db-gate-scenarios.md`:
+  - A correct `RenameColumn` is **red**, not green. During a zero-downtime swap both
+    application versions run at once, so a rename in a single release is a break — the gate
+    is right and the expectation above was wrong.
+  - D6 became `shipkit:allow-loss <target>` and applies to every destructive gate, so a
+    correctly marked drop is **green** with the loss printed. A blanket marker that waived
+    only the grep could never have shipped an intentional drop.
+  - The checkpoint held: the same destructive migration yields 3 Squawk findings plain and
+    **0** when wrapped in `DO $EF$`.
 
-### Two more design faults, both found by running stages
+### M4 — `push` + thin trigger · S
 
-**Failures reported nothing.** The first `pre` failure said only `exit code: 1`. Dagger's
-`ExecError` carries the command and both streams, and the report was throwing them away —
-one debugging round trip per failure, forever. Now the failing command and the relevant
-output lines are on the stage entry. Both streams are read, because .NET writes build and
-test failures to stdout, not stderr.
+- `push`: on `main` only, push `sha-<short>` to GHCR. Registry token arrives as a Dagger
+  `Secret`, never as a plain string.
+- `.github/workflows/ci.yml`: checkout, install pinned Dagger, `dagger call ci --source=.`.
+  Nothing else. Same file copied into the real project (D1).
+- Kit's own CI: the same workflow runs `ci` on `fixtures/dotnet-api/` for every push to
+  this repo.
+- **Done when:** a PR on the real project runs `ci`; a merge to `main` produces an image in
+  GHCR whose `/health` reports the merged SHA. GitHub free minutes are enough for now; a
+  self-hosted runner is a later, separate change.
+- **DONE 2026-09-12 except the authenticated push.** Branch gating, `publish: false`, the
+  refusal to push without a freshly built image, the token passed by reference, and module
+  resolution are all verified. The publish call reached GHCR and was rejected for missing
+  credentials — no token on this machine carries `write:packages`. It completes on the first
+  merge to `main`, where `secrets.GITHUB_TOKEN` supplies the scope.
+- Added while building it: `publish: false` in `shipkit.yaml`, so a fixture or a library
+  declines to publish as a decision rather than by an accident of configuration.
 
-**Every failure was exit code 3.** A format violation was being reported as an
-infrastructure problem. An `ExecError` means a command ran and said no — that is a gate, exit
-1. Only errors that are not `ExecError` and not `ShipkitError` are the environment failing.
-Since the exit code is the entire contract for a non-human caller, this made the contract
-meaningless.
+### M5 — Server preparation · M · *blocked on hosting decision*
 
-A third, smaller one: `dotnet test` exiting 0 having discovered nothing would have been a
-pass. The adapter now parses the runner's summary and the core fails on zero tests.
+- `server/cloud-init.yaml`: non-root user, SSH keys only, password login off, ufw 22/80/443,
+  fail2ban, unattended-upgrades, Docker.
+- `kamal init` in the client repo; `config/deploy.yml` with the app, kamal-proxy TLS via
+  Let's Encrypt, and Postgres as an accessory on a named volume (unless managed Postgres
+  is chosen — then just the connection string).
+- Secrets via `.kamal/secrets` reading from the CI secret store. A `docs/secrets.md` in the
+  client repo listing *where* each secret lives — this is the part that rots first.
+- Off-server backup: cron on the server → `pg_dump -Fc` → `rclone` to an S3-compatible
+  bucket at a different provider. Retention 30 daily / 12 monthly.
+- `docs/runbooks/restore.md`: step-by-step restore into a scratch database. **Executed
+  once by hand and the date recorded in the runbook.**
+- **Done when:** `kamal setup` brings the fixture up over HTTPS; the first nightly backup
+  exists in the bucket; the restore drill is dated.
 
-### A third fail-open, and a design the marker forced open
+### M6 — `deploy` · L
 
-The published Squawk image has no `linux/arm64` manifest: it would have worked on CI and
-failed on every Apple Silicon laptop. Squawk now comes from npm, which ships native binaries
-for both, pinned to an exact version — a linter that silently gains or loses a rule changes
-what the gate means.
+- `backup` per D7. The verified dump's bucket path is the gate token: `migrate` refuses to
+  run unless it receives one.
+- `migrate`: read last applied from prod (D5) → build the bundle for `head` → run it.
+  Failure stops the pipeline; the old image is still serving.
+- `release`: `kamal deploy --version sha-<short>`.
+- `verify`: GET `<url>/health` with retries for up to N seconds; passes only when
+  `version == sha-<short>`. A 200 from the previous container is a failure.
+- `rollback`: on `verify` failure, `kamal rollback <previous sha>`. Database is **not**
+  rolled back (roll forward); the run ends red with the backup path printed.
+- `clean`: `kamal prune`.
+- `--plan` / `--yes` per D3.
+- **Done when, on the fixture in production:** a deliberately failing migration → deploy
+  stops, old version still serving, no new container; a deliberately broken `/health` →
+  release happens, `verify` fails, rollback fires, old version serving again; a normal
+  change → new SHA served over HTTPS. Each of the three runs is recorded in
+  `docs/runbooks/deploy-scenarios.md` with the command, the output, and the date.
+- **DONE 2026-09-12** against `dev-server`, all three scenarios, recorded in
+  `docs/runbooks/m6-deploy-scenarios.md`. Over HTTP rather than HTTPS: TLS needs a public
+  name and is the one part of the definition of done that the simulated host cannot provide.
+  The rollback was broken when it was first needed and is now fixed and exercised.
 
-The bigger correction was to the intent marker. It began as `shipkit:destructive-ok`, a
-blanket "this migration is fine", which had two faults: a waiver obtained for one column let
-an unrelated second loss ride along inside the same migration, and it could not waive Squawk
-at all — so an intentional, reviewed drop could never ship, and the realistic outcome was
-someone deleting `ban-drop-column` from the config for every migration forever.
+### M7 — Monitoring, runbooks, tag · S
 
-It is now `shipkit:allow-loss <target>`: it must name what is being destroyed, it applies
-uniformly to Squawk, the grep scan and apply-to-copy, it is matched per statement rather than
-per file, and a marker that waives nothing is itself a failure (the stale-allowance gate),
-so markers cannot be added preemptively.
+- Uptime Kuma on infrastructure that is not the monitored server, watching the public URL
+  and `/health`.
+- Runbooks: deploy, rollback, restore, rotate a secret, add a migration safely.
+- `CLAUDE.md` snippet for client repos (the .NET rules, verbatim from §12 of the plan).
+- Tag `v1.0.0`. From here, changes to the core need a fixture scenario that fails without
+  them.
 
-### And one in the wrapper
+---
 
-`shipkit ci` was passing a **git SHA** to `--migration-base`, which expects a **migration id**.
-EF answered "the migration 'aeab9b5…' was not found" — loudly, thankfully. Decision D4 says
-"last migration id present on main, from `git merge-base`", and the wrapper had taken the
-merge-base commit itself. It now reads the migration files present at that commit and takes
-the newest id, which is argument translation — the wrapper's actual job.
+## Order and dependencies
 
-### The CLI had never been committed
+```
+M0 → M1 → M2 → M3 → M4 ─┐
+                         ├→ M6 → M7
+      (hosting decided) → M5 ─┘
+```
 
-The `.gitignore`'s .NET section carried a bare `bin/`, which matches at any depth — including
-this repository's own `bin/`, where the wrapper lives. Four commits went out without the
-kit's entry point. A clone would have had no `shipkit` command, and the kit's own workflow,
-which runs `node ../../bin/shipkit ci`, would have failed on its first run.
+M0–M4 need no decision that is still open and no server. M5 is the only milestone waiting
+on a decision, and M6 needs M5. If hosting is decided early, M5 can run in parallel with M3.
 
-Found by noticing that `git status` did not list a file that had certainly changed. The rule
-is now scoped to `**/src/**/bin/` and `**/tests/**/obj/` and the like, and .NET output is
-still ignored.
+## Known traps to watch for while building
 
-Worth remembering as a class: the checks in this repository all examine what the pipeline
-*does*. Nothing was watching what it *ships*.
-
-### The M4 gap, stated plainly
-
-**An authenticated push to GHCR has never run.** The `gh` token on this machine has scopes
-`repo, read:org, gist, project, admin:public_key` — no `write:packages` — so there is no
-credential here that could complete one, and obtaining one is not something to do on someone's
-behalf.
-
-What *is* verified is everything up to the credential: the address, the tag, the auth wiring,
-and a real request to GHCR's token endpoint that came back rejected for the right reason. The
-remaining unknown is one `withRegistryAuth` call with a working token.
-
-It verifies itself on the first merge to `main` in a client repo: the workflow passes
-`secrets.GITHUB_TOKEN`, which carries `packages: write` by default, so no PAT is needed.
-A local check, if wanted sooner, needs a PAT with `write:packages` in
-`SHIPKIT_REGISTRY_TOKEN` and `publish: true`.
-
-A local HTTP registry was tried first and refused — Dagger speaks HTTPS to registries, and
-the SDK's `registryService` publish option exists but adding it to production code purely to
-make a test possible is test scaffolding in the wrong place.
-
-### Still unverified
-
-| Assumption | Where | How to check |
-|---|---|---|
-| An authenticated registry push | `core/push.ts` | first merge to main, or a PAT |
-| A client repo consuming the kit as a remote module (`-m github.com/…`) — the repo is private, so Dagger needs git auth | `bin/shipkit` | M7, with `shipkit init` |
-| `applyArtifact` / migration bundles — never built or run | `adapters/dotnet.ts` | M6 |
-| Everything in `core/deploy.ts` | — | M6 |
-
-### Known limitation, recorded deliberately
-
-`allow-loss` can waive the destruction of a column that still holds data — scenario E does
-exactly that, on a column with three rows behind it. The protections are that the author must
-name the column, the marker is visible in review, and the run prints what it permitted along
-with the row count. What the gate cannot do is tell a reviewed decision from a careless one.
-| Squawk's JSON reporter flag and field names | `core/db.ts`, `core/sql-scan.ts` | M3. Unparseable output already fails closed |
-| **Squawk does not see statements inside `DO $$` blocks** | the reason the non-idempotent script is linted | M3 checkpoint. Until observed, the false-green risk (§7.2) is theoretical, and so is the gate |
-| `dotnet ef migrations script <from> <to>` argument form for "from X to HEAD" | `adapters/dotnet.ts` — the empty-string filter is a placeholder | M3, against the fixture |
-| `dotnet ef migrations list` output format (the `^\d{14}_` match) | `adapters/dotnet.ts` | M3 |
-| `dotnet tool install --global` + PATH expansion in a Dagger container | `adapters/dotnet.ts` | M2/M3 |
-| `source.dockerBuild({ buildArgs })` argument shape | `index.ts` build stage | M2 |
-| GHCR image name for Squawk | `core/db.ts` | M3 |
-
-## Deliberately not implemented
-
-These throw `EXIT.NOT_IMPLEMENTED` (5) rather than returning a neutral result, so a
-half-built pipeline can never report success:
-
-- `apply-to-copy` with seeded row/column assertions — M3, the strongest rename-trap mitigation
-- `push` to GHCR — M4
-- every `deploy` stage: backup, migrate, release, verify, rollback — M6
-- `deployPlan` reading production state — M6
-
-## Environment
-
-Dagger v0.21.9 is installed at `~/.local/bin/dagger` (user-local, no sudo). Docker Desktop
-29.4.0 provides the engine. The first `dagger develop` pulls the engine image and takes
-about a minute; afterwards it is cached.
-
-## Next
-
-`ci` is complete. M5 — server preparation — is the only thing standing between here and a
-working deploy, and it cannot start until the hosting target is chosen. Nothing else in the
-plan is blocked on anything but that decision.
+- Dagger's TypeScript SDK caches by input; a `Directory` that includes `bin/` and `obj/`
+  busts the cache every run. Exclude them at the `--source` boundary.
+- `dotnet ef migrations script` needs the *startup* project and the *migrations* project;
+  in a multi-project solution they differ. Both come from `shipkit.yaml`, never guessed.
+- The migration bundle must be built `--self-contained -r linux-x64` or it will not run on
+  a server without the SDK.
+- `kamal deploy` reads the image tag from `config/deploy.yml`; the core passes
+  `--version`, it does not edit the file.
+- Squawk's exit code is non-zero on warnings as well as errors. That is what we want;
+  do not add `--assume-in-transaction` or rule suppressions in the core.

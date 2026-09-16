@@ -46,11 +46,20 @@ export interface StackAdapter {
 }
 
 export interface DbAdapter {
-  /** e.g. "__EFMigrationsHistory", "_prisma_migrations". The core never hardcodes this. */
+  /**
+   * e.g. "__EFMigrationsHistory", "_prisma_migrations". The core never hardcodes this.
+   *
+   * Reading it is the core's job, not the adapter's: production is behind SSH on a network
+   * the adapter has no business knowing about. The adapter says what the table is called;
+   * the core decides how to reach it.
+   */
   readonly historyTable: string
-
-  /** Last applied migration id in a live database, or null if none. */
-  lastApplied(dsn: string, cfg: Config, src: Directory): Promise<string | null>
+  /**
+   * Names the id column can have, in order of preference. More than one because naming
+   * conventions rename it (`MigrationId` vs `migration_id`); the core reads which one the
+   * production table actually has rather than assuming (#12).
+   */
+  readonly historyIdColumns: readonly string[]
 
   /**
    * Plain, NON-idempotent SQL for the migrations in `(from, to]`. `null` means the very

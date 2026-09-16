@@ -19,11 +19,18 @@ export class ShipkitError extends Error {
     readonly code: ExitCode,
     message: string,
     /** What the caller should do about it. Surfaced as `next` in the report. */
-    readonly next?: string,
+    public next?: string,
   ) {
     super(message)
     this.name = "ShipkitError"
   }
+
+  /**
+   * Fields for the failing stage's report entry. A stage that fails still knows things worth
+   * reporting — which base it diffed against, how many migrations it looked at — and without
+   * this they were lost with the exception.
+   */
+  detail?: Record<string, unknown>
 }
 
 export const configError = (m: string, next?: string) => new ShipkitError(EXIT.CONFIG, m, next)

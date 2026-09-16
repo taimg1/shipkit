@@ -4,11 +4,11 @@
  * Every function returns a JSON report (docs/cli-design.md). The `shipkit` wrapper renders
  * it; `dagger call` prints it raw. Both paths are supported, permanently (ADR 0009).
  */
-import { argument, dag, Container, Directory, File, Secret, func, object } from "@dagger.io/dagger"
+import { argument, dag, Container, Directory, File, Platform, Secret, func, object } from "@dagger.io/dagger"
 import { Config, loadConfig } from "./config.js"
 import { selectAdapter } from "./adapters/index.js"
 import { resolveTargetFramework, targetFrameworkSources } from "./adapters/dotnet-parse.js"
-import { EXIT, ShipkitError, notImplemented } from "./errors.js"
+import { EXIT, ShipkitError, configError, notImplemented } from "./errors.js"
 import { ReportBuilder, execOutput, serialize, withDetail } from "./report.js"
 import { dbStage } from "./core/db.js"
 import { postgresService } from "./core/postgres.js"
@@ -16,6 +16,7 @@ import { push as pushImage } from "./core/push.js"
 import { backup as backupProduction, BackupResult } from "./core/backup.js"
 import { migrate as runMigrations } from "./core/migrate.js"
 import { lastApplied } from "./core/history.js"
+import { dockerPlatform, SUPPORTED_RIDS } from "./core/platform.js"
 import { waitForDatabase } from "./core/postgres-remote.js"
 import {
   bootDatabase,
@@ -53,8 +54,19 @@ const DEPLOY_STAGES = ["provision", "backup", "migrate", "release", "verify", "r
  * inspected locally is what gets deployed.
  */
 function buildImage(source: Directory, cfg: Config, sha: string): Container {
+  // Without an explicit platform the image takes the engine's architecture: amd64 in CI,
+  // arm64 on an Apple Silicon workstation. The second one publishes fine and then cannot run
+  // on an x86 server — at release, after the migrations (#18).
+  const platform = dockerPlatform(cfg.targetArch)
+  if (platform === null) {
+    throw configError(
+      `targetArch "${cfg.targetArch}" is not a runtime identifier the kit can build an image for`,
+      `Use one of: ${SUPPORTED_RIDS.join(", ")}.`,
+    )
+  }
   const built = source.dockerBuild({
     dockerfile: cfg.dockerfile,
+    platform: platform as Platform,
     buildArgs: [{ name: "GIT_SHA", value: sha }],
   })
   // Kamal refuses an image without this label, and only labels images it built itself.

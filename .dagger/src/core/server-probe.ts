@@ -10,6 +10,31 @@
 
 export type ContainerState = "running" | "stopped" | "missing"
 
+/**
+ * What the server calls its own architecture, as a Docker platform.
+ *
+ * `docker info` says `x86_64`; `docker version` says `amd64`. Both spellings are accepted so
+ * the probe is not hostage to which command answered.
+ */
+const PLATFORM_BY_SERVER_ARCH: Record<string, string> = {
+  x86_64: "linux/amd64",
+  amd64: "linux/amd64",
+  aarch64: "linux/arm64",
+  arm64: "linux/arm64",
+  armv7l: "linux/arm/v7",
+}
+
+/**
+ * The server's architecture as a Docker platform, or null when the answer is not one we know.
+ *
+ * Null is never treated as agreement — see `provisioning`. Failing to read this is the case the
+ * check exists for, so it must not read as a pass.
+ */
+export function parseServerArch(output: string): string | null {
+  const word = output.trim().split("\n").pop()?.trim() ?? ""
+  return PLATFORM_BY_SERVER_ARCH[word] ?? null
+}
+
 export interface ServerState {
   /** Whether the SSH user can run docker at all. */
   docker: "ok" | "unavailable"
@@ -17,6 +42,10 @@ export interface ServerState {
   db: ContainerState
   /** Containers labelled with the service, running or not: has this app ever been deployed here. */
   appContainers: number
+  /** The server's Docker platform, e.g. "linux/amd64", or null when it could not be read. */
+  arch: string | null
+  /** Exactly what the server said, for a message worth reading when arch is null. */
+  archRaw: string
 }
 
 /**
@@ -33,6 +62,9 @@ export function serverProbeScript(service: string, dbContainer: string | undefin
     `echo proxy:$(state kamal-proxy)`,
     dbContainer ? `echo db:$(state ${q(dbContainer)})` : "echo db:missing",
     `echo app:$(docker ps -a -q --filter ${q(`label=service=${service}`)} | wc -l | tr -d ' ')`,
+    // An image is built for one architecture and the server runs one; a deploy that gets this
+    // wrong dies at release, after the migrations (#18).
+    `echo arch:$(docker info --format '{{.Architecture}}' 2>/dev/null)`,
   ].join("\n")
 }
 
@@ -41,14 +73,17 @@ export type ProbeResult = { ok: true; state: ServerState } | { ok: false; reason
 export function parseServerProbe(output: string): ProbeResult {
   const facts = new Map<string, string>()
   for (const line of output.split("\n")) {
-    const m = /^(docker|proxy|db|app):(\S*)$/.exec(line.trim())
+    const m = /^(docker|proxy|db|app|arch):(\S*)$/.exec(line.trim())
     if (m) facts.set(m[1], m[2])
   }
 
   // Silence is not an empty server.
   if (!facts.has("docker")) return { ok: false, reason: "the server gave no answer" }
   if (facts.get("docker") === "unavailable") {
-    return { ok: true, state: { docker: "unavailable", proxy: "missing", db: "missing", appContainers: 0 } }
+    return {
+      ok: true,
+      state: { docker: "unavailable", proxy: "missing", db: "missing", appContainers: 0, arch: null, archRaw: "" },
+    }
   }
 
   const container = (v: string | undefined): ContainerState | null =>
@@ -59,7 +94,8 @@ export function parseServerProbe(output: string): ProbeResult {
   if (!proxy || !db || !Number.isInteger(app)) {
     return { ok: false, reason: `the server's answer was incomplete: ${output.trim().replace(/\n/g, "; ")}` }
   }
-  return { ok: true, state: { docker: "ok", proxy, db, appContainers: app } }
+  const archRaw = facts.get("arch") ?? ""
+  return { ok: true, state: { docker: "ok", proxy, db, appContainers: app, arch: parseServerArch(archRaw), archRaw } }
 }
 
 export type Provisioning =
@@ -71,8 +107,11 @@ export type Provisioning =
  *
  * Steps are part of the plan, so the token covers them: booting a production database is a
  * change to production and is confirmed like one.
+ *
+ * `building` is the Docker platform the image will be built for, from core/platform.ts. It is
+ * passed in rather than imported so this file stays testable without Dagger.
  */
-export function provisioning(state: ServerState, needsDb: boolean): Provisioning {
+export function provisioning(state: ServerState, needsDb: boolean, building: string): Provisioning {
   if (state.docker === "unavailable") {
     return {
       ok: false,
@@ -80,6 +119,27 @@ export function provisioning(state: ServerState, needsDb: boolean): Provisioning
       next:
         "Prepare the server first: Docker installed, and the SSH user in the docker group. " +
         "The kit deploys to a prepared server; it does not install system packages.",
+    }
+  }
+
+  // Checked before anything else about the app, because getting it wrong is not caught until
+  // release — by which time backup and migrate have run and the schema has already moved (#18).
+  if (state.arch === null) {
+    return {
+      ok: false,
+      reason: `the server did not say what architecture it runs (it answered "${state.archRaw || "nothing"}")`,
+      next:
+        "An unreadable architecture is not a matching one. Check `docker info` on the server, " +
+        "then plan again.",
+    }
+  }
+  if (state.arch !== building) {
+    return {
+      ok: false,
+      reason: `the server runs ${state.arch} but the image would be built for ${building}`,
+      next:
+        `Set targetArch in shipkit.yaml to a runtime identifier for ${state.arch}. Deploying ` +
+        "this would apply the migrations and only then fail to start the container.",
     }
   }
 

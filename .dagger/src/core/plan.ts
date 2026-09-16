@@ -11,6 +11,7 @@ import { stripBom } from "./sql-scan.js"
 import { servingVersion as servingHealthVersion } from "./verify.js"
 import { EXIT, ShipkitError } from "../errors.js"
 import { ServerState, parseServerProbe, provisioning, serverProbeScript } from "./server-probe.js"
+import { dockerPlatform, SUPPORTED_RIDS } from "./platform.js"
 import { remoteScript, sshContainer } from "./ssh.js"
 
 /** Asks the server what exists on it. An answer the kit cannot read stops the plan. */
@@ -50,7 +51,15 @@ export async function buildPlan(
   // The server first: everything below reads it, and each read used to turn "could not ask"
   // into "nothing there" (#13).
   const server = await probeServer(cfg, env, key)
-  const provision = provisioning(server, needsDb)
+  const building = dockerPlatform(cfg.targetArch)
+  if (building === null) {
+    throw new ShipkitError(
+      EXIT.CONFIG,
+      `targetArch "${cfg.targetArch}" is not a runtime identifier the kit can build an image for`,
+      `Use one of: ${SUPPORTED_RIDS.join(", ")}.`,
+    )
+  }
+  const provision = provisioning(server, needsDb, building)
   if (!provision.ok) throw new ShipkitError(EXIT.GATE, provision.reason, provision.next)
 
   // Nothing of this app has ever run here: there is no version to ask Kamal for. Otherwise Kamal

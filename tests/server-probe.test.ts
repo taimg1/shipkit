@@ -1,6 +1,12 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { parseServerProbe, provisioning, serverProbeScript } from "../.dagger/src/core/server-probe.ts"
+import {
+  parseServerProbe,
+  parseVersionProbe,
+  provisioning,
+  serverProbeScript,
+  versionProbeScript,
+} from "../.dagger/src/core/server-probe.ts"
 
 const AMD64 = "linux/amd64"
 const state = (over = {}) => ({ docker: "ok" as const, proxy: "running" as const, db: "running" as const, appContainers: 2, arch: AMD64 as string | null, archRaw: "x86_64", ...over })
@@ -80,4 +86,22 @@ test("a server that would not say its architecture is refused, not assumed to ag
 
 test("matching architectures pass without adding a step", () => {
   assert.deepEqual(provisioning(state(), true, AMD64), { ok: true, steps: [] })
+})
+
+// #11: the deploy's clean stage prunes old images, so a rollback target can simply be gone —
+// and `kamal rollback` exits 0 over a missing image, changing nothing.
+test("asks docker whether the image is still there", () => {
+  const s = versionProbeScript("ghcr.io/owner/app:sha-a1b2c3d")
+  assert.match(s, /docker image inspect/)
+  assert.match(s, /ghcr\.io\/owner\/app:sha-a1b2c3d/)
+})
+
+test("the image reference is quoted, not interpolated into a shell", () => {
+  assert.match(versionProbeScript("ghcr.io/o/a:sha-1'; rm -rf /"), /'\\''/)
+})
+
+test("present is present, and anything else is not", () => {
+  assert.equal(parseVersionProbe("image:yes\n"), true)
+  assert.equal(parseVersionProbe("image:no\n"), false)
+  assert.equal(parseVersionProbe(""), false)
 })

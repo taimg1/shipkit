@@ -59,7 +59,7 @@ export const EXIT = { OK: 0, GATE: 1, CONFIG: 2, INFRA: 3, CONFIRM: 4, NOT_IMPLE
  * "flag" never takes the next argument as its value; "value" does. Without that distinction
  * `shipkit --json ci` read "ci" as the value of --json.
  */
-const GLOBAL_OPTIONS = { json: "flag", sha: "value", explain: "flag", module: "value" }
+const GLOBAL_OPTIONS = { json: "flag", sha: "value", explain: "flag", module: "value", report: "value" }
 
 export const COMMAND_OPTIONS = {
   ci: { stage: "value", branch: "value", "migration-base": "value" },
@@ -69,6 +69,8 @@ export const COMMAND_OPTIONS = {
   backup: { env: "value", out: "value", "ssh-key": "value" },
   rollback: { env: "value", "ssh-key": "value" },
   doctor: {},
+  // Reads report files and prints markdown. It calls no module, so it takes no module options.
+  summary: { title: "value" },
 }
 
 function optionKind(name) {

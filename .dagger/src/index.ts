@@ -17,6 +17,7 @@ import { backup as backupProduction, BackupResult } from "./core/backup.js"
 import { migrate as runMigrations } from "./core/migrate.js"
 import { lastApplied } from "./core/history.js"
 import { dockerPlatform, SUPPORTED_RIDS } from "./core/platform.js"
+import { parseStages, stageRuns } from "./core/stage-select.js"
 import { versionMatchesTag } from "./core/health.js"
 import { parseVersionProbe, versionProbeScript } from "./core/server-probe.js"
 import { remoteScript, sshContainer } from "./core/ssh.js"
@@ -52,6 +53,21 @@ import { noTestsRan, testsFailed } from "./core/gates.js"
 
 const CI_STAGES = ["pre", "build", "test", "db", "push"]
 const DEPLOY_STAGES = ["provision", "backup", "migrate", "release", "verify", "rollback", "clean"]
+
+/** Deploy stages that only read production, so selecting them needs no plan token. */
+const READ_ONLY_STAGES = ["backup", "verify"]
+
+/**
+ * `--stage` naming something that is not a stage. Refused rather than ignored: an unmatched
+ * name selects no stage at all, so the run would do nothing and still exit 0.
+ */
+function unknownStage(unknown: string[], known: string[]): ShipkitError {
+  const names = unknown.map((n) => JSON.stringify(n)).join(", ")
+  return configError(
+    `not a stage of this command: ${names}`,
+    `Stages, in order: ${known.join(", ")}. Several may be given as --stage=build,push.`,
+  )
+}
 
 /**
  * One definition of "the image", used by `ci` and by `image` alike, so that what gets
@@ -109,9 +125,12 @@ export class Shipkit {
   ): Promise<string> {
     const r = new ReportBuilder("ci", sha)
     if (dirty) r.set("dirty", true)
-    const only = (name: string) => !stage || stage === name
+    const stages = parseStages(stage, CI_STAGES)
+    const only = (name: string) => stageRuns(stages, name)
 
     try {
+      if (stages.unknown.length > 0) throw unknownStage(stages.unknown, CI_STAGES)
+
       const cfg = await loadConfig(source)
       const adapter = selectAdapter(cfg)
       r.set("stack", adapter.name)
@@ -348,8 +367,15 @@ export class Shipkit {
         )
       }
 
-      const only = (name: string) => !stage || stage === name
-      const changesProduction = !stage || !["backup", "verify"].includes(stage)
+      const stages = parseStages(stage, DEPLOY_STAGES)
+      if (stages.unknown.length > 0) throw unknownStage(stages.unknown, DEPLOY_STAGES)
+      const only = (name: string) => stageRuns(stages, name)
+
+      // Reading is not changing: a backup or a verify on its own touches nothing on the
+      // server. Any other selected stage does, and one of them is enough.
+      const changesProduction =
+        stages.selected === null ||
+        [...stages.selected].some((name) => !READ_ONLY_STAGES.includes(name))
 
       if (changesProduction) {
         if (!planToken) {

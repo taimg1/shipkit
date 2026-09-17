@@ -1,0 +1,32 @@
+# What every stage job needs before it can call the pipeline.
+#
+# Extracted because ci.yml runs one job per stage now, and the Dagger version was about to be
+# pinned in five places. Setup only: nothing here decides what runs or whether it passed.
+name: shipkit setup
+description: Node, QEMU and Dagger, pinned.
+
+inputs:
+  dagger-version:
+    description: The Dagger version the module is built against.
+    required: false
+    default: v0.21.9
+
+runs:
+  using: composite
+  steps:
+    # The fixture's targetArch is linux-arm64, because the server it deploys to is dev-server,
+    # a container on an Apple Silicon Mac. Since #18 the image is built for the architecture it
+    # is meant to run on rather than for whatever built it — and these runners are x86. Without
+    # binfmt handlers the .NET SDK crashes inside the emulated build with NuGet errors that say
+    # nothing about architecture.
+    - uses: docker/setup-qemu-action@v3
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+
+    - name: Install Dagger
+      shell: bash
+      run: |
+        curl -fsSL https://dl.dagger.io/dagger/install.sh \
+          | DAGGER_VERSION=${{ inputs.dagger-version }} BIN_DIR=/usr/local/bin sh

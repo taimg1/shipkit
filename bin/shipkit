@@ -13,7 +13,7 @@
  *   shipkit --raw <args...>   pass through to `dagger call`; only the module is added
  */
 import { spawn, spawnSync } from "node:child_process"
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs"
+import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync } from "node:fs"
 import { dirname, join } from "node:path"
 import {
   COMMAND_OPTIONS,
@@ -30,6 +30,7 @@ import {
   translate,
   validateOptions,
 } from "./lib.mjs"
+import { renderSummary } from "./summary.mjs"
 
 const USAGE = `
 shipkit — CI/CD for turnkey client projects
@@ -44,9 +45,11 @@ shipkit — CI/CD for turnkey client projects
   shipkit backup [--out <path>]      a dump proven restorable, written to disk
   shipkit rollback <sha>
   shipkit doctor                     dagger? docker? shipkit.yaml? project?
+  shipkit summary <dir>              one markdown table from the reports under <dir>
 
 Options (an option a command does not take is an error, never ignored)
   --json            emit the raw report instead of a rendered table
+  --report <path>   also write the raw report here, for \`shipkit summary\` to collect
   --sha <sha>       commit being built (default: git rev-parse HEAD)
   --branch <name>   branch being built; only the default branch publishes
   --env <name>      deploy target (default: prod)
@@ -183,6 +186,34 @@ function record(report) {
   }
 }
 
+/**
+ * Every report file under `dir`, at any depth — `actions/download-artifact` puts each artifact
+ * in a directory of its own.
+ *
+ * A file that is not a report is skipped rather than fatal: the summary is the last thing a
+ * failed run has left, and it must not fail too.
+ */
+function collectReports(dir) {
+  let entries
+  try {
+    entries = readdirSync(dir, { recursive: true, withFileTypes: true })
+  } catch {
+    return []
+  }
+
+  const reports = []
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) continue
+    try {
+      const report = JSON.parse(readFileSync(join(entry.parentPath ?? dir, entry.name), "utf8"))
+      if (Array.isArray(report.stages)) reports.push(report)
+    } catch {
+      // Not a report. Nothing to say about it.
+    }
+  }
+  return reports
+}
+
 const ICON = { ok: "+", failed: "x", skipped: "-" }
 
 function render(report, logPath) {
@@ -289,6 +320,18 @@ async function main() {
   const invalid = validateOptions(key, opts)
   if (invalid) fail(invalid.code, invalid.message)
 
+  // `summary` reads files and prints markdown. It calls no module and reaches no engine, so it
+  // runs before module resolution — a broken `kit:` line must not stop a run explaining itself.
+  if (key === "summary") {
+    const dir = opts._[1]
+    if (!dir) fail(EXIT.CONFIG, "summary needs a directory of report files\n  shipkit summary ./reports")
+    const title = typeof opts.title === "string" ? opts.title : "CI"
+    process.stdout.write(renderSummary(collectReports(dir), { title }))
+    // Always 0: this command reports a verdict, it does not reach one. The jobs that ran the
+    // stages already failed the run; exiting non-zero here would only hide their reasons.
+    process.exit(EXIT.OK)
+  }
+
   // A deploy builds its migration bundle from the working tree while releasing the image of a
   // commit. With uncommitted changes the two would be different code (#6).
   if (key === "deploy" && typeof opts.yes === "string" && workingTreeDirty()) {
@@ -371,6 +414,15 @@ async function main() {
   }
 
   const logPath = record(report)
+  if (typeof opts.report === "string") {
+    try {
+      mkdirSync(dirname(opts.report), { recursive: true })
+      writeFileSync(opts.report, JSON.stringify(report, null, 2))
+    } catch (err) {
+      // The run already happened; losing its summary must not change its verdict.
+      process.stderr.write(`could not write ${opts.report}: ${err.message}\n`)
+    }
+  }
   process.stdout.write(opts.json ? JSON.stringify(report, null, 2) + "\n" : render(report, logPath) + "\n")
   process.exit(report.exitCode ?? (report.ok ? EXIT.OK : EXIT.GATE))
 }

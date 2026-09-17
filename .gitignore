@@ -1,6 +1,9 @@
 # run reports written by the CLI
 .shipkit/
 
+# stage reports collected for the run summary, written by CI
+reports/
+
 # generated migration artifacts
 ci/*.sql
 ci/*.bundle

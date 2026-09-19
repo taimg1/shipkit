@@ -12,7 +12,10 @@ import { remoteScript, shq, sshContainer } from "./ssh.js"
 export async function waitForDatabase(env: Environment, key: Secret, seconds = 90): Promise<void> {
   const script =
     `i=0; while [ $i -lt ${seconds} ]; do ` +
-    `docker exec ${shq(env.dbContainer ?? "")} pg_isready -U ${shq(env.dbUser)} -d ${shq(env.database)} >/dev/null 2>&1 && exit 0; ` +
+    // Over TCP on purpose. On first boot the image runs initdb and the init scripts against a
+    // temporary server that listens on the unix socket only, then restarts it; a socket check
+    // passes during that window and the next query fails. Seen on dev-server.
+    `docker exec ${shq(env.dbContainer ?? "")} pg_isready -h 127.0.0.1 -U ${shq(env.dbUser)} -d ${shq(env.database)} >/dev/null 2>&1 && exit 0; ` +
     `i=$((i+1)); sleep 1; done; exit 1`
   try {
     await sshContainer(env, key).withExec(["sh", "-c", remoteScript(env, script)]).sync()

@@ -120,3 +120,28 @@ export const verifyFailed = (expected: string, got: string | null) =>
     `health check reports version "${got ?? "none"}", expected "${expected}"`,
     "A 200 from the previous container is a failed deploy that looks green. Rolling back.",
   )
+
+/** Gate 4 — the right version is answering and cannot reach its database (C4). */
+export const notReady = (path: string, status: number, version: string) =>
+  new GateFailure(
+    "verify",
+    `version "${version}" is answering but ${path} returned ${status || "nothing"}, not 200`,
+    "The release cannot reach its database: a wrong connection string, a stale password, or a " +
+      "schema it does not expect. Rolling back.",
+  )
+
+/**
+ * Gate 4 failed and so did putting the previous version back (B15).
+ *
+ * Both are reported, the verify failure first: it is why production is in this state. The
+ * rollback's own reason is on its stage entry; this is what the run as a whole says.
+ */
+export const rollbackFailed = (verifyErr: unknown, previous: string, rollbackErr: unknown) => {
+  const why = (e: unknown) => (e instanceof Error ? e.message : String(e))
+  return new GateFailure(
+    "verify",
+    `${why(verifyErr)}; the rollback to ${previous} also failed: ${why(rollbackErr)}`,
+    "Production may be serving the failed release, or nothing. Check /health, then " +
+      `\`shipkit rollback ${previous}\` or redeploy a known-good commit. The database was not rolled back.`,
+  )
+}

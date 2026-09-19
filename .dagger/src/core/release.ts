@@ -6,6 +6,7 @@ import { hostKeyRefusal, kamalHostKeyProblem } from "./kamal-config.js"
 import { STRICT_SSH_CONFIG, hostKeyHint, knownHostsFor } from "./known-hosts.js"
 import { remoteScript, sshContainer } from "./ssh.js"
 import { LockHolder, lockAcquireScript, lockReleaseScript, parseLockAcquire, unlockCommand } from "./deploy-lock.js"
+import { containerVersionsScript, parseContainerVersions } from "./server-probe.js"
 
 /**
  * Kamal, with the project mounted and an SSH key it can use.
@@ -141,7 +142,7 @@ export async function pullImage(
   registryPassword?: Secret,
   kamalSecrets?: Secret,
 ): Promise<void> {
-  await kamal(source, env, key, registryPassword, kamalSecrets)
+  await (await kamal(source, env, key, registryPassword, kamalSecrets))
     .withExec(["kamal", "build", "pull", "--version", tag])
     .sync()
 }
@@ -182,7 +183,33 @@ export async function rollback(
 }
 
 /**
+ * The versions `kamal rollback` could boot on this server right now, newest first.
+ *
+ * Throws rather than returning an empty list when the server's answer is incomplete: "nothing
+ * to roll back to" and "could not ask" call for different things, and the second must not be
+ * mistaken for the first.
+ */
+export async function availableVersions(env: Environment, key: Secret, service: string): Promise<string[]> {
+  const out = await sshContainer(env, key)
+    .withExec(["sh", "-c", remoteScript(env, containerVersionsScript(service))])
+    .stdout()
+  const versions = parseContainerVersions(out)
+  if (versions === null) {
+    throw infraError(
+      "could not list the application's containers on the server",
+      "Check SSH access and that the deploy user can run docker, then try again.",
+    )
+  }
+  return versions
+}
+
+/**
  * Prune old containers and images, so a server does not fill up over a year of deploys.
+ *
+ * It does not empty the rollback window. `kamal prune all` keeps the newest
+ * `retain_containers` stopped containers (config/deploy.yml, default 5) and every image a
+ * container still uses, and `kamal rollback` needs exactly those. The deploy checks afterwards
+ * that the version it replaced survived (C12).
  *
  * `--version` is passed explicitly. Kamal otherwise derives a version from the git history,
  * and the source handed to it deliberately has none — but more to the point, the version is

@@ -56,8 +56,12 @@ commands for a database that predates that.
    it — that one only takes effect when the data directory is first initialised, so changing it
    alone changes nothing, but a stale copy is a wrong password waiting for the next restore. For
    `app`: update the variable `.kamal/secrets` points `ConnectionStrings__Default` at.
-3. Deploy. The application's container is replaced with the new value; `verify` proves the
-   release took, and `/health/ready` proves it still reaches the database.
+3. Deploy. `verify` requires a 200 from the readiness path (`ready:` in shipkit.yaml, e.g.
+   `/health/ready`) from the new release, so a release holding the wrong `app` password fails
+   the gate and is rolled back. It does **not** prove the password works for anything beyond the
+   query the readiness endpoint runs, and the rollback puts back a version that holds the
+   *old* value — which, after step 1, cannot connect either. The rollback's own verify says
+   so, and the run reports both failures: fix the value and deploy forward.
 
 Between steps 1 and 3 the running application has a stale password. Plan for the gap or
 create a second role, move to it, and drop the first.

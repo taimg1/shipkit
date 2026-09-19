@@ -148,6 +148,11 @@ prepare() {
   chown "$USER_NAME:$USER_NAME" "$ssh_dir/authorized_keys"
   chmod 600 "$ssh_dir/authorized_keys"
 
+  # Every deploy stores its verified pre-deploy dump here before migrating, and fails closed if
+  # it cannot (docs/runbooks/restore.md). Production data: the deploy user's and nobody else's.
+  install -d -m 700 -o "$USER_NAME" -g "$USER_NAME" /var/backups/shipkit
+  say "/var/backups/shipkit ready for ${USER_NAME} (mode 700)"
+
   step "3/7  docker"
   if command -v docker >/dev/null 2>&1; then
     say "already installed: $(docker --version)"

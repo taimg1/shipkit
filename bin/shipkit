@@ -13,11 +13,15 @@
  *   shipkit --raw <args...>   pass through to `dagger call`; only the module is added
  */
 import { spawn, spawnSync } from "node:child_process"
-import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync } from "node:fs"
+import * as fs from "node:fs"
+import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, rmSync } from "node:fs"
 import { dirname, join } from "node:path"
 import {
   COMMAND_OPTIONS,
   EXIT,
+  backupExportDir,
+  backupOut,
+  collectBackup,
   commandKey,
   expandSecretsFile,
   isDirty,
@@ -42,7 +46,8 @@ shipkit — CI/CD for turnkey client projects
   shipkit deploy --plan              what would happen; changes nothing
   shipkit deploy --yes=<token>       execute exactly that plan
                                      backup -> migrate -> release -> verify -> rollback -> clean
-  shipkit backup [--out <path>]      a dump proven restorable, written to disk
+  shipkit backup [--out <path>]      a dump proven restorable, stored on the server
+                                     and written here with mode 0600
   shipkit rollback <sha>
   shipkit doctor                     dagger? docker? shipkit.yaml? project?
   shipkit summary <dir>              one markdown table from the reports under <dir>
@@ -226,6 +231,7 @@ function render(report, logPath) {
       s.tests ? `${s.tests.passed}/${s.tests.total} passed` : "",
       s.base !== undefined ? `base=${s.base}` : "",
       Array.isArray(s.pending) && s.pending.length ? `${s.pending.length} pending` : "",
+      s.backup?.path ? `stored=${s.backup.path}` : "",
     ]
       .filter(Boolean)
       .join("  ")
@@ -265,6 +271,7 @@ function render(report, logPath) {
   if (report.pending) {
     lines.push(`  pending: ${report.pending.length ? report.pending.join(", ") : "none"}`)
   }
+  if (report.written) lines.push("", `  dump written to ${report.written} (mode 0600)`)
   if (report.dirty) {
     lines.push("", "  ! the source has uncommitted changes: an image built from it is tagged -dirty and never published")
   }
@@ -401,16 +408,45 @@ async function main() {
     process.exit(EXIT.INFRA)
   }
 
+  // `backup` returns a directory, not a report: exported into a private scratch directory
+  // beside --out, and taken apart afterwards. Its stdout is the export path, never JSON (D-01).
+  const exportDir = key === "backup" ? backupExportDir(backupOut(opts)) : undefined
+  if (exportDir) {
+    try {
+      rmSync(exportDir, { recursive: true, force: true })
+      mkdirSync(dirname(exportDir), { recursive: true })
+      mkdirSync(exportDir, { mode: 0o700 })
+    } catch (err) {
+      fail(EXIT.CONFIG, `cannot prepare ${exportDir} for the backup: ${err.message}`)
+    }
+  }
+
   const { status, out } = await run(args, { json: !!opts.json })
 
   let report
-  try {
-    report = JSON.parse(out)
-  } catch {
-    // The module always returns JSON. Anything else means Dagger itself failed —
-    // an engine error, a missing function, a module that did not build.
-    process.stderr.write(out || "dagger produced no output\n")
-    process.exit(status === 0 ? EXIT.INFRA : EXIT.INFRA)
+  if (exportDir) {
+    let collected
+    try {
+      collected = collectBackup(exportDir, backupOut(opts), fs)
+    } catch (err) {
+      collected = { error: `could not write ${backupOut(opts)}: ${err.message}` }
+    } finally {
+      rmSync(exportDir, { recursive: true, force: true })
+    }
+    if (collected.error) {
+      process.stderr.write(`${collected.error}\n${out}`)
+      process.exit(EXIT.INFRA)
+    }
+    report = collected.report
+  } else {
+    try {
+      report = JSON.parse(out)
+    } catch {
+      // The module always returns JSON. Anything else means Dagger itself failed —
+      // an engine error, a missing function, a module that did not build.
+      process.stderr.write(out || "dagger produced no output\n")
+      process.exit(EXIT.INFRA)
+    }
   }
 
   const logPath = record(report)

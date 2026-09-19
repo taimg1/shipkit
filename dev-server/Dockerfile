@@ -27,6 +27,9 @@ RUN ssh-keygen -A \
  && sed -i 's/^deploy:!/deploy:*/' /etc/shadow \
  && mkdir -p /home/deploy/.ssh && chmod 700 /home/deploy/.ssh && chown deploy:deploy /home/deploy/.ssh
 
+# Where every deploy stores its verified pre-deploy dump, as server/bootstrap.sh creates it.
+RUN mkdir -p /var/backups/shipkit && chown deploy:deploy /var/backups/shipkit && chmod 700 /var/backups/shipkit
+
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

@@ -53,7 +53,9 @@ expand/contract change is safe to roll back through, a single-release column dro
 
 If the schema is the problem:
 
-1. Restore the database from the pre-deploy backup (`docs/runbooks/restore.md`), or
+1. Restore the database from the pre-deploy backup — on the server, in
+   `/var/backups/shipkit/<service>/`, named after the deploy's commit; the deploy report's
+   `backup.path` names the exact file (`docs/runbooks/restore.md`), or
 2. Ship a corrective migration and deploy forward.
 
 Never write a `Down` migration for production recovery.

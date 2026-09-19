@@ -97,7 +97,7 @@ $ shipkit deploy --plan
   image       sha-a1b2c3d  ←  currently sha-9f8e7d6
   migrations  20260911_AddOrdersIndex
   sql         CREATE INDEX CONCURRENTLY ... (12 lines, no destructive ops)
-  backup      will run first; last verified 2026-09-10 03:00
+  backup      will run first; last verified 9f8e7d6-20260910T030012Z.pgc (2026-09-10T03:00:14Z)
 
   to execute: shipkit deploy --yes=7f3a91c2e004
 ```

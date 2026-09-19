@@ -3,6 +3,10 @@
 # ADR 0001: a checkout and one call, nothing else. The pipeline itself lives in the Dagger
 # module, so moving to Gitea Actions, Woodpecker or GitLab CI means rewriting this file, not
 # the pipeline.
+#
+# Every action is pinned by commit SHA, with its version in a comment: a tag can be moved to
+# other code by whoever controls the action's repository. To move a pin, resolve the new tag to
+# its commit (`git ls-remote --tags https://github.com/<owner>/<action>`) and update both.
 name: ci
 
 on:
@@ -11,28 +15,51 @@ on:
   pull_request:
     branches: [main]
 
+# Read-only unless the job below says otherwise. Without this the job gets the repository's
+# default token, which on older repositories and organisations is write-all.
+permissions:
+  contents: read
+
 jobs:
   ci:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # Only with `publish: true` in shipkit.yaml. The default GITHUB_TOKEN carries it; no PAT
-      # is needed. Uncomment together with SHIPKIT_REGISTRY_TOKEN below.
-      # packages: write
+      # Needed because shipkit.yaml says `publish: true`: the push stage uploads the image with
+      # this job's GITHUB_TOKEN; no PAT is needed. With `publish: false` delete this line and
+      # SHIPKIT_REGISTRY_TOKEN below. Only a push to the default branch ever publishes — the
+      # module decides that from the event, not from the branch name a pull request carries.
+      packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # The full history: the migration diff base is the merge base with origin/main.
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
 
+      # Only when `targetArch` in shipkit.yaml is not the runner's (linux-x64), e.g. linux-arm64
+      # for an ARM server: the image is built for the server's architecture, and without binfmt
+      # handlers the emulated .NET build fails with NuGet errors that say nothing about it.
+      # - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+
+      # The release archive, checked against a checksum written here, then installed. Not
+      # `install.sh | sh`: that runs whatever the download host serves. The sum is from the
+      # release's checksums.txt; the version and the sum change together, never one alone.
       - name: Install Dagger
+        env:
+          DAGGER_VERSION: v0.21.9
+          DAGGER_SHA256: 33eea0b08d6be444bada18e64b2216459100d6070abcb4b5345cee40c9fff982
         run: |
-          curl -fsSL https://dl.dagger.io/dagger/install.sh \
-            | DAGGER_VERSION=v0.21.9 BIN_DIR=/usr/local/bin sh
+          set -euo pipefail
+          test "$(uname -sm)" = "Linux x86_64" || { echo "the pinned Dagger checksum is for linux/amd64, this runner is $(uname -sm)"; exit 1; }
+          archive="dagger_${DAGGER_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" "https://dl.dagger.io/dagger/releases/${DAGGER_VERSION#v}/$archive"
+          echo "$DAGGER_SHA256  $RUNNER_TEMP/$archive" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" dagger
+          install -m 0755 "$RUNNER_TEMP/dagger" /usr/local/bin/dagger
 
       # The kit version is the commit on the `kit:` line of shipkit.yaml — the one place it is
       # written, so the wrapper and the module it drives cannot come from different commits.
@@ -41,8 +68,9 @@ jobs:
       # the runners, fails with "GitFetcher requires an Arborist constructor" (#10). Extracted to
       # RUNNER_TEMP so the kit's own files never become part of --source=.
       - name: shipkit ci
-        # env:
-        #   SHIPKIT_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          # Only a push has anything to publish; a pull request run is not handed the token.
+          SHIPKIT_REGISTRY_TOKEN: ${{ github.event_name == 'push' && secrets.GITHUB_TOKEN || '' }}
         run: |
           KIT_SHA=$(sed -n 's#^kit: github.com/taimg1/shipkit@\([0-9a-f]\{40\}\)$#\1#p' shipkit.yaml)
           test -n "$KIT_SHA" || { echo "shipkit.yaml: no pinned kit: line (kit: github.com/taimg1/shipkit@<40-char commit>)"; exit 2; }

@@ -70,7 +70,7 @@ export const COMMAND_OPTIONS = {
   rollback: { env: "value", "ssh-key": "value" },
   doctor: {},
   // Reads report files and prints markdown. It calls no module, so it takes no module options.
-  summary: { title: "value" },
+  summary: { title: "value", jobs: "value" },
 }
 
 function optionKind(name) {
@@ -243,6 +243,31 @@ export function expandSecretsFile(text, env) {
   return missing.length > 0 ? { missing } : { content: lines.join("\n").replace(/\n+$/, "") + "\n" }
 }
 
+/**
+ * The branch `ci` names to the module, which publishes only when it is the default branch.
+ *
+ * On GitHub Actions the answer comes from the event, never from a branch name. A pull request's
+ * head branch is chosen by whoever opened it: a fork whose branch is called `main` used to be
+ * reported as `main` and pass the publish check. Only a push names a branch that was actually
+ * pushed to; everything else — pull_request, workflow_dispatch, schedule — is reported as the
+ * event and ref it is, which is never equal to a branch name and so never publishes. An
+ * explicit --branch does not change that: on a pull request it is as much the author's as
+ * GITHUB_HEAD_REF.
+ *
+ * Outside GitHub Actions: --branch, else the checked-out branch from git (`local`), else
+ * undefined — which the module refuses to publish from rather than guessing.
+ */
+export function publishBranch(env, explicit, local) {
+  if (env.GITHUB_ACTIONS === "true") {
+    const ref = env.GITHUB_REF ?? ""
+    if (env.GITHUB_EVENT_NAME !== "push" || !ref.startsWith("refs/heads/")) {
+      return `${env.GITHUB_EVENT_NAME || "unknown-event"}:${ref || "unknown-ref"}`
+    }
+    return explicit || ref.slice("refs/heads/".length)
+  }
+  return explicit || local()
+}
+
 const REGISTRY_TOKEN_VAR = "SHIPKIT_REGISTRY_TOKEN"
 const SSH_KEY_VAR = "SHIPKIT_SSH_KEY"
 const DB_URL_VAR = "SHIPKIT_DATABASE_URL"
@@ -290,7 +315,7 @@ export function translate(key, opts, ctx) {
     case "ci": {
       const a = withBase(["ci", ...src, `--sha=${sha()}`, ...(opts.stage ? [`--stage=${opts.stage}`] : [])])
 
-      const branch = opts.branch || ctx.branch()
+      const branch = publishBranch(ctx.env, opts.branch, ctx.branch)
       if (branch) a.push(`--branch=${branch}`)
       if (ctx.dirty()) a.push("--dirty")
 

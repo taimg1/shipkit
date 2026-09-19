@@ -7,7 +7,8 @@ name: shipkit-dev
 
 services:
   registry:
-    image: registry:2
+    # registry:2, pinned by digest (core/images.ts explains why; the same applies here).
+    image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
     # Reachable as `registry:5000` from the server, and on the host for inspection.
     ports:
       - "5555:5000"

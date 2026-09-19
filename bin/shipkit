@@ -30,7 +30,7 @@ import {
   translate,
   validateOptions,
 } from "./lib.mjs"
-import { renderSummary } from "./summary.mjs"
+import { parseJobResults, renderSummary } from "./summary.mjs"
 
 const USAGE = `
 shipkit — CI/CD for turnkey client projects
@@ -46,12 +46,14 @@ shipkit — CI/CD for turnkey client projects
   shipkit rollback <sha>
   shipkit doctor                     dagger? docker? shipkit.yaml? project?
   shipkit summary <dir>              one markdown table from the reports under <dir>
+    [--jobs <file>]                  GitHub's toJSON(needs): a failed job fails the verdict
 
 Options (an option a command does not take is an error, never ignored)
   --json            emit the raw report instead of a rendered table
   --report <path>   also write the raw report here, for \`shipkit summary\` to collect
   --sha <sha>       commit being built (default: git rev-parse HEAD)
-  --branch <name>   branch being built; only the default branch publishes
+  --branch <name>   branch being built; only the default branch publishes. On GitHub
+                    Actions only a push event publishes, whatever --branch says
   --env <name>      deploy target (default: prod)
   --explain         print the underlying \`dagger call\` and exit
   --module <ref>    shipkit module to call; default: the "kit:" line in shipkit.yaml
@@ -83,10 +85,11 @@ function gitSha() {
   return r.status === 0 ? r.stdout.trim() : "dev"
 }
 
-/** The branch being built. Only the default branch publishes. */
+/**
+ * The checked-out branch, for runs outside GitHub Actions. On Actions the branch comes from the
+ * event instead (publishBranch in lib.mjs): GITHUB_HEAD_REF is named by the pull request's author.
+ */
 function gitBranch() {
-  if (process.env.GITHUB_HEAD_REF) return process.env.GITHUB_HEAD_REF // pull request
-  if (process.env.GITHUB_REF_NAME) return process.env.GITHUB_REF_NAME // push
   const r = spawnSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" })
   return r.status === 0 ? r.stdout.trim() : undefined
 }
@@ -326,7 +329,17 @@ async function main() {
     const dir = opts._[1]
     if (!dir) fail(EXIT.CONFIG, "summary needs a directory of report files\n  shipkit summary ./reports")
     const title = typeof opts.title === "string" ? opts.title : "CI"
-    process.stdout.write(renderSummary(collectReports(dir), { title }))
+    // GitHub's `needs` results, so a job that failed without writing a report still fails the
+    // verdict. Unreadable counts as failed: the summary must not say ok about what it cannot see.
+    let jobs
+    if (typeof opts.jobs === "string") {
+      try {
+        jobs = parseJobResults(readFileSync(opts.jobs, "utf8"))
+      } catch {
+        jobs = null
+      }
+    }
+    process.stdout.write(renderSummary(collectReports(dir), { title, jobs }))
     // Always 0: this command reports a verdict, it does not reach one. The jobs that ran the
     // stages already failed the run; exiting non-zero here would only hide their reasons.
     process.exit(EXIT.OK)
@@ -375,7 +388,7 @@ async function main() {
       fail(
         EXIT.CONFIG,
         "rollback needs the version to put back\n" +
-          "  shipkit rollback sha-a1b2c3d  — `shipkit deploy --plan` shows what is serving now",
+          "  shipkit rollback sha-<commit>  — `shipkit deploy --plan` shows what is serving now",
       )
     }
     fail(
@@ -396,7 +409,7 @@ async function main() {
   if (!daggerAvailable()) {
     process.stderr.write(
       "dagger is not installed or not on PATH\n" +
-        "  install: curl -fsSL https://dl.dagger.io/dagger/install.sh | BIN_DIR=/usr/local/bin sh\n",
+        "  install the version .github/actions/setup/action.yml pins, from https://docs.dagger.io/install\n",
     )
     process.exit(EXIT.INFRA)
   }

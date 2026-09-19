@@ -18,6 +18,24 @@ curl https://api.client.com/health   # what is actually answering
 If those disagree, trust `/health` and work out why before rolling anywhere. Kamal derives
 its answer from the `latest` tag, and a rollback targets the tag.
 
+## Tags name the whole commit
+
+`ci` tags an image `sha-<40-character commit>`. It used to be the first seven characters, which
+collide on a large repository — and a second push under the same tag silently replaces what
+`deploy` and `rollback` select. `rollback` still accepts the old `sha-<7>` tags that are on the
+server, so going back across the change works.
+
+Deploying a commit **again** does not cross it: `deploy` looks for `sha-<40>`, and a commit
+published before the change is in the registry only under `sha-<7>`. Run `ci` for that commit on
+the current kit (it publishes the full tag) before redeploying it.
+
+`ci` publishes only on a push to the default branch, and refuses — red, not skipped — when it
+cannot tell which branch it is on or when `--sha` is not a full commit. A pull request never
+publishes, whatever its branch is called: on GitHub the wrapper takes the branch from the event,
+not from the pull request's head branch. The `push` stage records the image's digest in the ci
+report (`digest`); deploy still pulls by tag, so compare the two by hand when it matters:
+`docker buildx imagetools inspect <registry>:sha-<commit>`.
+
 ## The window is shorter than you think
 
 **A deploy prunes old images, including the one you would roll back to.** `clean` runs

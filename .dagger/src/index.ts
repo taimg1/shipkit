@@ -8,7 +8,7 @@ import { argument, dag, Container, Directory, File, Platform, Secret, func, obje
 import { Config, loadConfig } from "./config.js"
 import { selectAdapter } from "./adapters/index.js"
 import { resolveTargetFramework, targetFrameworkSources } from "./adapters/dotnet-parse.js"
-import { EXIT, ShipkitError, configError, notImplemented } from "./errors.js"
+import { EXIT, ShipkitError, configError, infraError, notImplemented } from "./errors.js"
 import { ReportBuilder, execOutput, serialize, withDetail } from "./report.js"
 import { dbStage } from "./core/db.js"
 import { postgresService } from "./core/postgres.js"
@@ -18,6 +18,7 @@ import { migrate as runMigrations } from "./core/migrate.js"
 import { lastApplied } from "./core/history.js"
 import { dockerPlatform, SUPPORTED_RIDS } from "./core/platform.js"
 import { parseStages, stageRuns } from "./core/stage-select.js"
+import { imageTag, publishDecision, publishedDigest } from "./core/publish-gate.js"
 import { versionMatchesTag } from "./core/health.js"
 import { parseVersionProbe, versionProbeScript } from "./core/server-probe.js"
 import { remoteScript, sshContainer } from "./core/ssh.js"
@@ -112,7 +113,7 @@ export class Shipkit {
     sha = "dev",
     /** Last migration id present on main; the diff base (D4). */
     migrationBase?: string,
-    /** Branch being built. Only the default branch publishes (see core/push.ts). */
+    /** Branch being built. Only the default branch publishes; an unknown one never does (core/publish-gate.ts). */
     branch?: string,
     /** Registry credential. A Secret, never a string — it must not reach a log or a report. */
     registryToken?: Secret,
@@ -146,7 +147,7 @@ export class Shipkit {
       // A dirty build must not be able to pass for the commit: not in its tag, and not in the
       // version /health reports, which is what verify compares.
       const version = dirty ? `${sha}-dirty` : sha
-      const tag = `sha-${sha.slice(0, 7)}${dirty ? "-dirty" : ""}`
+      const tag = imageTag(sha, dirty)
       let image: Container | undefined
 
       if (only("build")) {
@@ -194,27 +195,27 @@ export class Shipkit {
       } else r.skip("db", "not selected")
 
       if (only("push")) {
-        if (!cfg.publish) {
-          r.skip("push", "publish: false in shipkit.yaml")
-        } else if (branch !== undefined && branch !== cfg.defaultBranch) {
-          // Not a gate failure — most runs are branch builds and this is their normal end.
-          r.skip("push", `branch "${branch}" is not ${cfg.defaultBranch}`)
-        } else if (!image) {
-          r.skip("push", "no image was built in this run")
-        } else if (dirty) {
-          // A refusal, not a skip: this run was supposed to publish, and what it would publish
-          // is not the commit it is labelled with.
+        const decision = publishDecision({
+          publish: cfg.publish,
+          defaultBranch: cfg.defaultBranch,
+          branch,
+          sha,
+          dirty,
+          built: image !== undefined,
+        })
+        if (decision.action === "skip") {
+          r.skip("push", decision.reason)
+        } else if (decision.action === "refuse") {
           await r.stage("push", async () => {
-            throw new ShipkitError(
-              EXIT.CONFIG,
-              "refusing to publish an image built from uncommitted changes",
-              "Commit the changes and run ci again; the registry must only hold images of real commits.",
-            )
+            throw new ShipkitError(EXIT.CONFIG, decision.reason, decision.next)
           })
         } else {
           await r.stage("push", async () => {
             const address = await pushImage(image!, cfg, tag, registryToken, registryUser)
-            return withDetail(address, { published: address })
+            // What `deploy` should one day pin to: a tag can be pushed again, a digest cannot.
+            const digest = publishedDigest(address)
+            if (!digest) throw infraError(`the registry did not return a digest for ${address}`)
+            return withDetail(address, { published: address, digest })
           })
         }
       } else r.skip("push", "not selected")
@@ -353,7 +354,7 @@ export class Shipkit {
     kamalSecrets?: Secret,
   ): Promise<string> {
     const r = new ReportBuilder("deploy", sha)
-    const tag = `sha-${sha.slice(0, 7)}`
+    const tag = imageTag(sha)
     let previousVersion: string | null = null
     let plannedProvision: string[] = []
 
@@ -577,7 +578,7 @@ export class Shipkit {
   @func({ cache: "never" })
   async rollback(
     @argument({ defaultPath: ".", ignore: IGNORE }) source: Directory,
-    /** The image tag to put back, as `ci` published it: sha-a1b2c3d. */
+    /** The image tag to put back, as `ci` published it: sha-<commit>. */
     toVersion: string,
     env = "prod",
     sshKey?: Secret,
@@ -594,7 +595,7 @@ export class Shipkit {
         throw new ShipkitError(
           EXIT.CONFIG,
           `"${toVersion}" is not a tag this pipeline published`,
-          "Tags are sha-<short commit>. `shipkit deploy --plan` shows the one currently serving.",
+          "Tags are sha-<commit>. `shipkit deploy --plan` shows the one currently serving.",
         )
       }
 

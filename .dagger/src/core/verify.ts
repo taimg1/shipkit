@@ -2,6 +2,7 @@ import { dag, ReturnType } from "@dagger.io/dagger"
 import { Environment } from "../config.js"
 import { verifyFailed } from "./gates.js"
 import { readVersion } from "./health.js"
+import { ALPINE_IMAGE } from "./images.js"
 
 export interface VerifyResult {
   version: string
@@ -36,7 +37,7 @@ export async function verify(
 
   const out = await dag
     .container()
-    .from("alpine:3.21")
+    .from(ALPINE_IMAGE)
     .withExec(["apk", "add", "--no-cache", "curl"])
     .withEnvVariable("SHIPKIT_NO_CACHE", Date.now().toString())
     .withExec(["sh", "-c", script], { expect: ReturnType.Any })
@@ -68,7 +69,7 @@ export async function servingVersion(
   const url = `${env.url.replace(/\/$/, "")}${healthPath}`
   const out = await dag
     .container()
-    .from("alpine:3.21")
+    .from(ALPINE_IMAGE)
     .withExec(["apk", "add", "--no-cache", "curl"])
     .withEnvVariable("SHIPKIT_NO_CACHE", Date.now().toString())
     .withExec(["sh", "-c", `curl -fsS --max-time 5 "${url}" || true`], { expect: ReturnType.Any })

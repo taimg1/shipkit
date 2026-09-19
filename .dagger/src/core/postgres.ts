@@ -1,6 +1,7 @@
 import { dag, Service } from "@dagger.io/dagger"
+import { POSTGRES_IMAGE } from "./images.js"
 
-export const PG_IMAGE = "postgres:17-alpine"
+export const PG_IMAGE = POSTGRES_IMAGE
 export const PG_USER = "postgres"
 export const PG_PASSWORD = "postgres"
 

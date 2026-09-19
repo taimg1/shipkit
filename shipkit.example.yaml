@@ -36,3 +36,10 @@ health: /health
 environments:
   prod:
     url: https://api.client.com
+    # host and hostKey are added together once the server exists. A host without its hostKey
+    # is a config error: every SSH connection verifies the server against this line and
+    # refuses anything else.
+    # host: 203.0.113.10
+    # sshPort: 22
+    # sshUser: deploy
+    # hostKey: "203.0.113.10 ssh-ed25519 AAAA..."   # from server/bootstrap.sh's output

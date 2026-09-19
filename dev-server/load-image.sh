@@ -14,8 +14,12 @@ TAG="${2:?usage: load-image.sh <local-image> <target-tag>}"
 TARGET="registry:5000/shipkit-fixture:${TAG}"
 
 here="$(cd "$(dirname "$0")" && pwd)"
+# The server's key is fixed (host-key/), so it is pinned here too rather than waved through.
+known_hosts="$(mktemp)"
+trap 'rm -f "$known_hosts"' EXIT
+printf '[localhost]:2222 %s\n' "$(cut -d' ' -f1,2 "$here/host-key/ssh_host_ed25519_key.pub")" > "$known_hosts"
 ssh_opts=(-i "$here/.ssh/id_ed25519" -p 2222
-          -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+          -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts" -o LogLevel=ERROR)
 
 echo "saving $IMAGE and loading it on the server..."
 docker save "$IMAGE" | ssh "${ssh_opts[@]}" deploy@localhost "docker load"

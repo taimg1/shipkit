@@ -18,6 +18,18 @@ ssh-keygen -t ed25519 -N "" -C shipkit-dev-server -f .ssh/id_ed25519
 cp .ssh/id_ed25519.pub .ssh/authorized_keys
 ```
 
+The server's own host key is different: it is fixed and committed in `host-key/`, and
+`fixtures/dotnet-api/shipkit.yaml` pins it as `hostKey`
+(`SHA256:5kCc5wjjO3Qqwji4vrIROmWSCPd2q9YgX0BqWukHrp4`). The pipeline refuses any server whose
+key is not pinned, so a key regenerated on every rebuild would mean re-pinning on every
+rebuild. Its private half being in the repository is harmless only because this container is
+never anything but a simulation. To connect by hand without trusting it blindly:
+
+```bash
+printf '[localhost]:2222 %s\n' "$(cut -d' ' -f1,2 host-key/ssh_host_ed25519_key.pub)" > .ssh/known_hosts
+ssh -o UserKnownHostsFile=.ssh/known_hosts -i .ssh/id_ed25519 -p 2222 deploy@localhost
+```
+
 ## What it proves
 
 Verified 2026-09-12: an image built from `fixtures/dotnet-api` was loaded into the registry,

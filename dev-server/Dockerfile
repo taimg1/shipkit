@@ -18,7 +18,16 @@ RUN apk add --no-cache openssh bash curl postgresql17-client
 #
 # Alpine's `adduser -D` leaves the account locked ("!"), and sshd refuses locked accounts even
 # for key logins; "*" means "no password" without "locked".
-RUN ssh-keygen -A \
+#
+# The host key is fixed and committed (host-key/), not generated per build: the fixture pins it
+# in shipkit.yaml as hostKey, and the pipeline refuses a server whose key it does not know. A
+# simulated server whose key changed on every rebuild would teach everyone to re-pin without
+# looking, which is the habit the pin exists to break. Only ed25519 is offered, so there is
+# exactly one key to pin. Its private half is public knowledge — one more reason this image is
+# never pointed at anything real.
+COPY host-key/ssh_host_ed25519_key host-key/ssh_host_ed25519_key.pub /etc/ssh/
+RUN chmod 600 /etc/ssh/ssh_host_ed25519_key && chmod 644 /etc/ssh/ssh_host_ed25519_key.pub \
+ && printf '\nHostKey /etc/ssh/ssh_host_ed25519_key\n' >> /etc/ssh/sshd_config \
  && sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config \
  && sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config \
  && (addgroup -S docker 2>/dev/null || true) \

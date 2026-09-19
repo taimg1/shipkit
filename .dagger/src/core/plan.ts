@@ -14,6 +14,7 @@ import { ServerState, parseServerProbe, provisioning, serverProbeScript } from "
 import { dockerPlatform, SUPPORTED_RIDS } from "./platform.js"
 import { remoteScript, sshContainer } from "./ssh.js"
 import { imageTag as tagFor } from "./publish-gate.js"
+import { newestBackup } from "./backup.js"
 
 /** Asks the server what exists on it. An answer the kit cannot read stops the plan. */
 export async function probeServer(cfg: Config, env: Environment, key: Secret): Promise<ServerState> {
@@ -104,7 +105,10 @@ export async function buildPlan(
         ? "no schema change"
         : `${sqlText.split("\n").filter((l) => l.trim().length > 0).length} lines`,
     destructive: /\b(DROP\s+(COLUMN|TABLE)|ALTER\s+COLUMN)\b/i.test(sqlText),
-    lastVerifiedBackup: null,
+    // Read from the server's backup directory, where only verified dumps are ever renamed into
+    // place. Not part of the token: taking a backup between plan and deploy changes nothing the
+    // confirmation was about.
+    lastVerifiedBackup: needsDb ? await newestBackup(env, key, cfg.service) : null,
   }
 
   return { ...base, token: planToken(base) }

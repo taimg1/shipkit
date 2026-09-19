@@ -107,7 +107,8 @@ export const backupUnverified = (reason: string) =>
   new GateFailure(
     "backup",
     `backup is not verified: ${reason}`,
-    "The migration will not run without a restorable dump. Check the backup job and bucket.",
+    "The migration will not run without a restorable dump stored on the server " +
+      "(/var/backups/shipkit/<service>). Fix what the reason names and deploy again.",
   )
 
 /** Gate 4 — the deployed SHA is not the one answering. */

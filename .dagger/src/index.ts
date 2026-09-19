@@ -373,8 +373,9 @@ export class Shipkit {
       if (stages.unknown.length > 0) throw unknownStage(stages.unknown, DEPLOY_STAGES)
       const only = (name: string) => stageRuns(stages, name)
 
-      // Reading is not changing: a backup or a verify on its own touches nothing on the
-      // server. Any other selected stage does, and one of them is enough.
+      // Reading is not changing: a backup or a verify on its own changes nothing production
+      // serves (a backup only adds a dump to its own directory). Any other selected stage does,
+      // and one of them is enough.
       const changesProduction =
         stages.selected === null ||
         [...stages.selected].some((name) => !READ_ONLY_STAGES.includes(name))
@@ -440,8 +441,14 @@ export class Shipkit {
 
       let backupResult: BackupResult | null = null
       if (only("backup")) {
+        // The dump is stored on the server inside this stage; if it cannot be, the stage fails
+        // and migrate never runs.
         backupResult = await r.stage("backup", async () => {
-          const { result } = await backupProduction(target, sshKey)
+          const { result } = await backupProduction(target, sshKey, {
+            service: cfg.service,
+            sha,
+            retention: cfg.backupRetention,
+          })
           return withDetail(result, { backup: result })
         })
       } else r.skip("backup", "not selected")
@@ -523,9 +530,14 @@ export class Shipkit {
    * A verified backup of production, on demand.
    *
    * The same code the deploy runs, exposed on its own — a dump that has been proven
-   * restorable by restoring it, not one that merely exists:
+   * restorable by restoring it, not one that merely exists, stored on the server like the
+   * deploy's and also handed back:
    *
    *   shipkit backup --out prod.pgc
+   *
+   * Returns a directory rather than the file: `report.json` always, `dump.pgc` only when the
+   * backup was verified and stored. A bare File had no room for a report, so a success printed a
+   * path the wrapper could not read (exit 3) and a failure was a Dagger error with no report.
    *
    * This is what makes a restore drill something a person can actually do. A backup strategy
    * nobody has restored from is an assumption, and the day it stops being an assumption is
@@ -538,26 +550,47 @@ export class Shipkit {
   async backup(
     @argument({ defaultPath: ".", ignore: IGNORE }) source: Directory,
     env = "prod",
+    sha = "dev",
     sshKey?: Secret,
-  ): Promise<File> {
-    const { target } = await resolveTarget(source, env)
-    if (!sshKey) {
-      throw new ShipkitError(
-        EXIT.CONFIG,
-        "backup needs an SSH key for the target",
-        "Pass --ssh-key=file:<path> or set SHIPKIT_SSH_KEY.",
-      )
+  ): Promise<Directory> {
+    const r = new ReportBuilder("backup", sha)
+    let dump: File | undefined
+    let report: string
+    try {
+      const { cfg, target } = await resolveTarget(source, env)
+      if (!sshKey) {
+        throw new ShipkitError(
+          EXIT.CONFIG,
+          "backup needs an SSH key for the target",
+          "Pass --ssh-key=file:<path> or set SHIPKIT_SSH_KEY.",
+        )
+      }
+
+      const taken = await r.stage("backup", async () => {
+        const out = await backupProduction(target, sshKey, {
+          service: cfg.service,
+          sha,
+          retention: cfg.backupRetention,
+        })
+        return withDetail(out, { backup: out.result })
+      })
+      if (!taken.dump) {
+        throw new ShipkitError(
+          EXIT.GATE,
+          `there is nothing to back up: ${taken.result.status === "empty-database" ? taken.result.reason : "no dump was produced"}`,
+          "Production has no schema yet. There is no dump to take and nothing to lose.",
+        )
+      }
+      dump = taken.dump
+      report = serialize(r.success())
+    } catch (err) {
+      dump = undefined
+      report = serialize(r.failure(err))
     }
 
-    const { result, dump } = await backupProduction(target, sshKey)
-    if (!dump) {
-      throw new ShipkitError(
-        EXIT.GATE,
-        `there is nothing to back up: ${result.status === "empty-database" ? result.reason : "no dump was produced"}`,
-        "Production has no schema yet. There is no dump to take and nothing to lose.",
-      )
-    }
-    return dump
+    // Production data: readable by whoever runs the command and nobody else, from the first byte.
+    const out = dag.directory().withNewFile("report.json", report, { permissions: 0o600 })
+    return dump ? out.withFile("dump.pgc", dump, { permissions: 0o600 }) : out
   }
 
   /**

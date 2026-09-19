@@ -360,15 +360,17 @@ export function translate(key, opts, ctx) {
         ...credentials(opts, ctx.env),
       ]
     }
+    // The module returns a directory — report.json always, dump.pgc when verified — exported
+    // next to --out, so the dump can be renamed into place without crossing a filesystem.
     case "backup": {
-      const out = opts.out || "prod-backup.pgc"
       return [
         "backup",
         ...src,
         `--env=${opts.env || "prod"}`,
+        `--sha=${sha()}`,
         ...credentials(opts, ctx.env),
         "export",
-        `--path=${out}`,
+        `--path=${backupExportDir(backupOut(opts))}`,
       ]
     }
     case "doctor":
@@ -376,4 +378,40 @@ export function translate(key, opts, ctx) {
     default:
       return undefined
   }
+}
+
+/** Where `shipkit backup` writes the dump. */
+export const backupOut = (opts) => opts.out || "prod-backup.pgc"
+
+/** The directory the module's result is exported into: hidden, beside the dump it becomes. */
+export function backupExportDir(out) {
+  const slash = out.lastIndexOf("/")
+  const dir = slash >= 0 ? out.slice(0, slash + 1) : ""
+  return `${dir}.${out.slice(slash + 1)}.shipkit-export`
+}
+
+/**
+ * Takes the exported backup directory apart: the report, and the dump when the report says it
+ * is good. Returns { report } or { error } — never a report from a directory that has none, and
+ * never a dump the report did not vouch for.
+ *
+ * `fs` is injected so this can be tested without writing a production dump anywhere. The dump is
+ * made owner-only before it gets its final name and never exists there with other permissions.
+ */
+export function collectBackup(dir, out, fs) {
+  let report
+  try {
+    report = JSON.parse(fs.readFileSync(`${dir}/report.json`, "utf8"))
+  } catch {
+    return { error: "the backup produced no readable report" }
+  }
+  if (!report.ok) return { report }
+
+  const dump = `${dir}/dump.pgc`
+  if (!fs.existsSync(dump)) {
+    return { error: "the backup reported success but returned no dump" }
+  }
+  fs.chmodSync(dump, 0o600)
+  fs.renameSync(dump, out)
+  return { report: { ...report, written: out } }
 }

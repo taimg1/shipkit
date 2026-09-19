@@ -145,5 +145,7 @@ Application configuration. No database, no TLS, no DNS: `kamal-proxy` gets the c
 the first deploy, and the database accessory is booted by the deploy's `provision` stage
 (`shipkit deploy --plan` lists it before anything runs).
 
-Nor off-site backups. A backup that lives on the server it protects is not a backup — see
+Nor off-site backups. It creates `/var/backups/shipkit` (mode 700, owned by the deploy user),
+where every deploy stores its verified pre-deploy dump — a deploy fails closed without it. But a
+backup that lives only on the server it protects does not survive losing that server — see
 `docs/runbooks/restore.md`.

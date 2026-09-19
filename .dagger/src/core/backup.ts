@@ -1,8 +1,24 @@
 import { dag, File, Secret } from "@dagger.io/dagger"
 import { Environment } from "../config.js"
 import { backupUnverified } from "./gates.js"
+import { infraError } from "../errors.js"
 import { PG_IMAGE, PG_PASSWORD, PG_USER, postgresService } from "./postgres.js"
-import { remoteScript, shq, sshContainer } from "./ssh.js"
+import { hostKeyOptions, remoteScript, shq, sshContainer } from "./ssh.js"
+import {
+  TABLE_COUNT,
+  backupDir,
+  backupFileName,
+  describeNewest,
+  listingScript,
+  parseCount,
+  parseListing,
+  parseSha256,
+  restoreArgs,
+  restoreShortfall,
+  retentionVictims,
+  storeScript,
+  tableCountScript,
+} from "./backup-store.js"
 
 /**
  * Gate 2 evidence. A backup is what was proven restorable, not what was written.
@@ -19,8 +35,14 @@ export type BackupResult =
       entries: number
       /** Tables present after actually restoring it into an empty database. */
       restoredTables: number
-      /** Where the verified dump can be read from. */
+      /** Tables production had when asked, just before the dump. */
+      productionTables: number
+      /** Where the verified dump is kept on the server — the file a restore starts from. */
       path: string
+      /** Of the stored file, as the server computed it after the upload. */
+      sha256: string
+      /** Older dumps deleted to stay within `backupRetention`. */
+      pruned: string[]
     }
   | {
       status: "empty-database"
@@ -34,20 +56,44 @@ export type BackupResult =
  */
 const MIN_BYTES = 100
 
+/** Where a verified dump is stored, and how many of them to keep. */
+export interface BackupStore {
+  /** Kamal's service name; the dumps live in /var/backups/shipkit/<service>. */
+  service: string
+  /** The commit being deployed, which names the file. */
+  sha: string
+  retention: number
+}
+
 /**
- * Dumps production, then proves the dump can be restored (decision D7).
+ * Dumps production, proves the dump can be restored (decision D7), and stores it on the server.
  *
  * "Non-empty" is not the property that matters. A dump can be the right size, parse as an
- * archive, and still restore into nothing. The only evidence worth having is a restore that
- * produced tables, so that is what this gate requires.
+ * archive, and still restore into nothing — or into three of forty tables. The only evidence
+ * worth having is a restore that finished without an error and produced every table production
+ * has, so that is what this gate requires.
+ *
+ * And a verified dump nobody kept is not a backup. It used to be proven restorable and then
+ * discarded with the container that held it (B1): the gate passed, the migration ran, and there
+ * was nothing to restore from. The dump is now stored before this returns, and failing to store
+ * it fails the gate — the migration never runs against a production nobody can put back.
  */
 export async function backup(
   env: Environment,
   key: Secret,
+  store: BackupStore,
   outPath = "/out/dump.pgc",
 ): Promise<{ result: BackupResult; dump?: File }> {
   if (!env.dbContainer) {
     throw backupUnverified("no database container is configured for this environment")
+  }
+  // Checked before dumping: finding out after a ten-minute dump that there is nowhere to put it
+  // wastes the ten minutes.
+  const dir = backupDir(store.service)
+  if (!dir) {
+    throw backupUnverified(
+      `the service name "${store.service}" cannot name a backup directory; set "service" in shipkit.yaml`,
+    )
   }
 
   // Asked before dumping, so that an empty dump can be told apart from a broken one. These
@@ -115,51 +161,174 @@ export async function backup(
       "-c",
       `until pg_isready -h scratch -U ${PG_USER} >/dev/null 2>&1; do sleep 1; done`,
     ])
-    // pg_restore exits non-zero on benign ownership warnings; the table count is the verdict.
+    // Any error fails the restore, and a failed restore fails the gate (B3).
+    .withExec(restoreArgs("scratch", PG_USER, "restore_check", "/dump.pgc"))
     .withExec([
-      "sh",
-      "-c",
-      `pg_restore -h scratch -U ${PG_USER} -d restore_check --no-owner --no-privileges /dump.pgc || true`,
-    ])
-    .withExec([
-      "psql",
+      "psql", "-v", "ON_ERROR_STOP=1",
       `postgresql://${PG_USER}:${PG_PASSWORD}@scratch:5432/restore_check`,
       "-tAc",
-      "select count(*) from information_schema.tables where table_schema='public'",
+      TABLE_COUNT,
     ])
     .stdout()
 
-  const restoredTables = Number(restored.trim())
-  if (!Number.isFinite(restoredTables) || restoredTables <= 0) {
-    throw backupUnverified(
-      "the dump restored into an empty database — it parses, but it contains nothing",
+  const restoredTables = parseCount(restored)
+  if (restoredTables === null) {
+    throw backupUnverified(`could not read the table count of the restored copy: ${restored.trim().slice(0, 300)}`)
+  }
+  const shortfall = restoreShortfall(restoredTables, tables)
+  if (shortfall) throw backupUnverified(shortfall)
+
+  const stored = await persist(env, key, dump, dir, store)
+  return {
+    result: {
+      status: "verified",
+      bytes,
+      entries,
+      restoredTables,
+      productionTables: tables,
+      path: stored.path,
+      sha256: stored.sha256,
+      pruned: stored.pruned,
+    },
+    dump,
+  }
+}
+
+/**
+ * How many tables production actually has, asked over the same channel as the dump.
+ *
+ * Anything but a number is an infrastructure failure, never zero. Zero means "nothing to back
+ * up", so an answer misread as zero is the one mistake that switches the backup off (B11).
+ */
+async function productionTableCount(env: Environment, key: Secret): Promise<number> {
+  const script = tableCountScript(env)
+
+  let out: string
+  try {
+    out = await sshContainer(env, key)
+      .withExec(["sh", "-c", remoteScript(env, script)])
+      .stdout()
+  } catch (err) {
+    throw infraError(
+      `could not ask production how many tables it has: ${(err as Error).message.slice(0, 300)}`,
+      `Check that ${env.dbContainer} is running and that ${env.dbUser} can connect to ${env.database}.`,
     )
   }
 
-  return { result: { status: "verified", bytes, entries, restoredTables, path: outPath }, dump }
-}
-
-/** How many tables production actually has, asked over the same channel as the dump. */
-async function productionTableCount(env: Environment, key: Secret): Promise<number> {
-  const query =
-    "select count(*) from information_schema.tables where table_schema='public'"
-  // stdin and a quoted heredoc, for the same reason as in history.ts: nothing in the query
-  // then has to survive a shell.
-  const script =
-    `docker exec -i ${shq(env.dbContainer ?? "")} psql -U ${shq(env.dbUser)} -d ${shq(env.database)} -tA ` +
-    `<<'SHIPKIT_SQL'\n${query}\nSHIPKIT_SQL\n`
-
-  const out = await sshContainer(env, key)
-    .withExec(["sh", "-c", remoteScript(env, script)])
-    .stdout()
-
-  const n = Number(out.trim())
-  if (!Number.isFinite(n)) {
-    // Failing closed: an unreadable answer is not "production is empty". Reading it as
-    // empty is what skips the backup entirely.
-    throw backupUnverified(
-      `could not read the table count from production; psql said: ${out.trim().slice(0, 300)}`,
+  const n = parseCount(out)
+  if (n === null) {
+    throw infraError(
+      `could not read the table count from production; psql said: ${out.trim().slice(0, 300) || "(nothing)"}`,
+      "An unreadable answer is not \"production is empty\" — reading it as empty is what skips the backup.",
     )
   }
   return n
+}
+
+/**
+ * Puts the verified dump in the service's backup directory on the server (storeScript: temporary
+ * name, digest compared, chmod 600, atomic rename), then applies retention.
+ */
+async function persist(
+  env: Environment,
+  key: Secret,
+  dump: File,
+  dir: string,
+  store: BackupStore,
+): Promise<{ path: string; sha256: string; pruned: string[] }> {
+  const name = backupFileName(store.sha, new Date())
+  const path = `${dir}/${name}`
+  const temp = `${dir}/.${name}.partial`
+  const scp = [
+    "scp",
+    "-i", "/root/.ssh/id_ed25519",
+    "-P", String(env.sshPort),
+    ...hostKeyOptions,
+    "-o", "BatchMode=yes",
+    "/backup/dump.pgc",
+    `${env.sshUser}@${env.host}:${temp}`,
+  ]
+    .map(shq)
+    .join(" ")
+
+  // The digest is compared before the rename: a dump that arrived different from the one that
+  // was restored is not the verified dump.
+  const upload = storeScript({
+    local: "/backup/dump.pgc",
+    dir,
+    temp,
+    path,
+    upload: scp,
+    remote: (script) => remoteScript(env, script),
+  })
+
+  let sha256: string | null
+  try {
+    sha256 = parseSha256(
+      await sshContainer(env, key)
+        .withMountedFile("/backup/dump.pgc", dump)
+        .withExec(["sh", "-c", upload])
+        .stdout(),
+    )
+  } catch (err) {
+    // Best effort, and never allowed to replace the reason: a failed cleanup must not be what
+    // the report says went wrong.
+    await sshContainer(env, key)
+      .withExec(["sh", "-c", remoteScript(env, `rm -f ${temp}`)])
+      .sync()
+      .catch(() => undefined)
+    throw backupUnverified(
+      `the dump was verified but could not be stored in ${dir} on the server: ${(err as Error).message.slice(0, 400)}. ` +
+        `The directory must exist and belong to ${env.sshUser} (server/bootstrap.sh creates it)`,
+    )
+  }
+  if (!sha256) {
+    throw backupUnverified(`the dump was uploaded to ${path} but its digest could not be read back`)
+  }
+
+  // Retention runs only after the new dump is in place, and never deletes it.
+  const listing = parseListing(await listBackups(env, key, dir))
+  if (!listing.ok) {
+    throw backupUnverified(`the dump is stored at ${path}, but the backup directory could not be listed: ${listing.reason}`)
+  }
+  if (!listing.files.some((f) => f.name === name)) {
+    throw backupUnverified(`the dump was renamed to ${path}, but the server does not list it`)
+  }
+  const pruned = retentionVictims(listing.files, store.retention, name)
+  // A retention that silently stops working fills the disk the database lives on, so failing to
+  // prune fails the stage too — with the new dump already safely in place.
+  if (pruned.length > 0) {
+    try {
+      await sshContainer(env, key)
+        .withExec(["sh", "-c", remoteScript(env, `cd ${shq(dir)} && rm -f -- ${pruned.map(shq).join(" ")}`)])
+        .sync()
+    } catch (err) {
+      throw infraError(
+        `the dump is stored at ${path}, but older backups could not be deleted: ${(err as Error).message.slice(0, 300)}`,
+        `Check ownership of ${dir} on the server; retention keeps ${store.retention}.`,
+      )
+    }
+  }
+  return { path, sha256, pruned }
+}
+
+function listBackups(env: Environment, key: Secret, dir: string): Promise<string> {
+  return sshContainer(env, key)
+    .withExec(["sh", "-c", remoteScript(env, listingScript(dir))])
+    .stdout()
+}
+
+/**
+ * The newest verified dump on the server, for the plan: its name and when the server wrote it.
+ * Null when the service has never stored one. A listing that cannot be read is an error, not
+ * "never" — the plan must not claim there is no backup because it failed to look.
+ */
+export async function newestBackup(env: Environment, key: Secret, service: string): Promise<string | null> {
+  const dir = backupDir(service)
+  if (!dir) return null
+  const listing = parseListing(await listBackups(env, key, dir))
+  if (!listing.ok) {
+    throw infraError(`cannot read the backups on the server: ${listing.reason}`)
+  }
+  return describeNewest(listing.files)
 }

@@ -39,6 +39,11 @@ publish: true
 # a failed deploy that looks green.
 health: /health
 
+# How many verified pre-deploy dumps to keep on the server, in
+# /var/backups/shipkit/<service>/. Older ones are deleted after each new one is stored.
+# A positive integer; anything else is a config error.
+backupRetention: 10
+
 environments:
   prod:
     url: https://api.client.com

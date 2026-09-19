@@ -3,6 +3,7 @@ import { parse } from "yaml"
 import { configError } from "./errors.js"
 import { hostKeyHint, parseKnownHosts } from "./core/known-hosts.js"
 import { configProblem } from "./config-validate.js"
+import { parseRetention } from "./core/backup-store.js"
 
 export type StackName = "dotnet" | "nest" | "next" | "custom"
 export type DbKind = "postgres" | "none"
@@ -53,6 +54,11 @@ export interface Config {
    * failure happens on the server, mid-deploy, after the backup has already run.
    */
   targetArch: string
+  /**
+   * How many verified pre-deploy dumps to keep on the server, per service. Older ones are
+   * deleted after each new one is stored. Default 10.
+   */
+  backupRetention: number
   /** Deploy targets by name; `prod` must exist for `deploy`. */
   environments: Record<string, Environment>
 }
@@ -126,6 +132,8 @@ export async function loadConfig(source: Directory): Promise<Config> {
   }
 
   const service = (c.service as string) ?? ""
+  const retention = parseRetention(c.backupRetention)
+  if (!retention.ok) throw configError(retention.reason, "Set it to how many dumps to keep, e.g. 10.")
   const rawEnvironments = (c.environments ?? {}) as Record<string, Record<string, unknown>>
   const environments: Record<string, Environment> = {}
 
@@ -188,6 +196,7 @@ export async function loadConfig(source: Directory): Promise<Config> {
     targetArch: (c.targetArch as string) ?? "linux-x64",
     defaultBranch: (c.defaultBranch as string) ?? "main",
     publish: c.publish === undefined ? true : c.publish === true,
+    backupRetention: retention.value,
     environments,
   }
   // Every value that reaches a shell is checked for shape here, before anything runs.

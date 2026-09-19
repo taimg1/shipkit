@@ -15,7 +15,7 @@ shipkit deploy --yes=<token>   # runs exactly that plan
   image       sha-a1b2c3d4…  <-  currently sha-9f8e7d6…   (tags carry the full commit)
   migrations  20260911_AddOrdersIndex
   sql         12 lines
-  backup      will run first; last verified 2026-09-10 03:00
+  backup      will run first; last verified 9f8e7d6-20260910T030012Z.pgc (2026-09-10T03:00:14Z)
 
   to execute: shipkit deploy --yes=7f3a91c2e004
 ```
@@ -37,6 +37,14 @@ merged, production moved under you — the token stops matching and the deploy r
 ## What runs
 
 `backup` → `migrate` → `release` → `verify` → `rollback` (only if verify fails) → `clean`.
+
+`backup` dumps production, restores the dump into a scratch database (it must restore without
+an error and with every table production has), and stores it on the server as
+`/var/backups/shipkit/<service>/<sha>-<UTC timestamp>.pgc` (mode 0600), keeping the newest
+`backupRetention` (default 10). The stage's report entry has the `path` and `sha256`. If the
+dump cannot be verified or stored, the stage fails and `migrate` does not run. Restoring from it:
+`docs/runbooks/restore.md`. A server bootstrapped before this existed needs the directory once — re-run
+`server/bootstrap.sh` (idempotent) or `sudo install -d -m 700 -o deploy -g deploy /var/backups/shipkit`.
 
 Everything before `release` is recoverable: a failed backup or a failed migration leaves the
 old version serving and production untouched.

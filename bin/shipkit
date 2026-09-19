@@ -226,6 +226,7 @@ function render(report, logPath) {
       s.tests ? `${s.tests.passed}/${s.tests.total} passed` : "",
       s.base !== undefined ? `base=${s.base}` : "",
       Array.isArray(s.pending) && s.pending.length ? `${s.pending.length} pending` : "",
+      Array.isArray(s.rollbackWindow) ? `${s.rollbackWindow.length} version(s) left to roll back to` : "",
     ]
       .filter(Boolean)
       .join("  ")
@@ -252,6 +253,9 @@ function render(report, logPath) {
       if (f.sql) lines.push(`        ${f.sql}`)
       else if (f.message) lines.push(`        ${f.message}`)
     }
+  }
+  if (Array.isArray(report.available)) {
+    lines.push("", `  ${report.available.length} version(s) on the server to roll back to: ${report.available.join(", ") || "none"}`)
   }
   if (report.rendered) lines.push("", report.rendered)
   if (report.plan && !report.rendered) lines.push("", `  plan token: ${report.plan.token}`)

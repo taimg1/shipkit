@@ -8,7 +8,7 @@ import { argument, dag, Container, Directory, File, Platform, Secret, func, obje
 import { Config, loadConfig } from "./config.js"
 import { selectAdapter } from "./adapters/index.js"
 import { resolveTargetFramework, targetFrameworkSources } from "./adapters/dotnet-parse.js"
-import { EXIT, ShipkitError, configError, notImplemented } from "./errors.js"
+import { EXIT, ShipkitError, configError, gateError, notImplemented } from "./errors.js"
 import { ReportBuilder, execOutput, serialize, withDetail } from "./report.js"
 import { dbStage } from "./core/db.js"
 import { postgresService } from "./core/postgres.js"
@@ -17,13 +17,13 @@ import { backup as backupProduction, BackupResult } from "./core/backup.js"
 import { migrate as runMigrations } from "./core/migrate.js"
 import { lastApplied } from "./core/history.js"
 import { dockerPlatform, SUPPORTED_RIDS } from "./core/platform.js"
-import { parseStages, stageRuns } from "./core/stage-select.js"
+import { deploySelectionProblem, parseStages, stageRuns } from "./core/stage-select.js"
 import { versionMatchesTag } from "./core/health.js"
-import { parseVersionProbe, versionProbeScript } from "./core/server-probe.js"
-import { remoteScript, sshContainer } from "./core/ssh.js"
+import { parseRetainContainers } from "./core/server-probe.js"
 import { servingVersion as servingHealth } from "./core/verify.js"
 import { waitForDatabase } from "./core/postgres-remote.js"
 import {
+  availableVersions,
   bootDatabase,
   clean as cleanServer,
   currentVersion,
@@ -49,7 +49,7 @@ async function resolveTarget(source: Directory, env: string) {
   }
   return { cfg, adapter: adapter as StackAdapter, target }
 }
-import { noTestsRan, testsFailed } from "./core/gates.js"
+import { noTestsRan, rollbackFailed, testsFailed } from "./core/gates.js"
 
 const CI_STAGES = ["pre", "build", "test", "db", "push"]
 const DEPLOY_STAGES = ["provision", "backup", "migrate", "release", "verify", "rollback", "clean"]
@@ -369,6 +369,10 @@ export class Shipkit {
 
       const stages = parseStages(stage, DEPLOY_STAGES)
       if (stages.unknown.length > 0) throw unknownStage(stages.unknown, DEPLOY_STAGES)
+      // Before the plan token is asked for: `--stage=rollback` used to demand one and then run
+      // nothing (D-06).
+      const early = deploySelectionProblem(stages, [])
+      if (early) throw configError(early.message, early.next)
       const only = (name: string) => stageRuns(stages, name)
 
       // Reading is not changing: a backup or a verify on its own touches nothing on the
@@ -426,6 +430,11 @@ export class Shipkit {
         plannedProvision = plan.provision
       }
 
+      // Provisioning runs only when selected, and a selection that leaves out provisioning the
+      // plan needs is refused before anything starts rather than migrating a server with no
+      // database (D-06).
+      const late = deploySelectionProblem(stages, plannedProvision)
+      if (late) throw configError(late.message, late.next)
       if (plannedProvision.length > 0) {
         await r.stage("provision", async () => {
           if (plannedProvision.some((step) => step.startsWith("boot the database"))) {
@@ -434,7 +443,7 @@ export class Shipkit {
           }
           return withDetail(plannedProvision, { provisioned: plannedProvision })
         })
-      } else r.skip("provision", "server already provisioned")
+      } else r.skip("provision", only("provision") ? "server already provisioned" : "not selected")
 
       let backupResult: BackupResult | null = null
       if (only("backup")) {
@@ -478,7 +487,7 @@ export class Shipkit {
       if (only("verify")) {
         try {
           await r.stage("verify", async () => {
-            const result = await verifyHealth(target, cfg.health, sha)
+            const result = await verifyHealth(target, { health: cfg.health, ready: cfg.ready }, sha, cfg.verifyTimeout)
             return withDetail(result, { verified: result })
           })
         } catch (err) {
@@ -486,14 +495,33 @@ export class Shipkit {
           // anything else, then report red. The database is NOT rolled back — migrations
           // roll forward, and the backup exists for the other case (ADR 0005).
           if (previousVersion) {
-            await r.stage("rollback", async () => {
-              await rollbackTo(source, target, sshKey, previousVersion!, registryToken, kamalSecrets)
-              return withDetail(previousVersion!, {
-                rolledBackTo: previousVersion,
-                note: "the database was not rolled back; migrations roll forward",
-                backup: backupResult,
+            const to: string = previousVersion
+            try {
+              await r.stage("rollback", async () => {
+                // `kamal rollback` to a version with no container exits 0 and changes nothing.
+                const available = await availableVersions(target, sshKey, cfg.service)
+                if (!available.includes(to)) {
+                  throw gateError(`${to} is not on the server to roll back to (available: ${available.join(", ") || "none"})`)
+                }
+                await rollbackTo(source, target, sshKey, to, registryToken, kamalSecrets)
+                // Proven, not assumed (B15): the version put back is the one answering, and it
+                // can reach the database. An unverified rollback reported as done is a second
+                // green lie on top of the first.
+                const back = await verifyHealth(
+                  target, { health: cfg.health, ready: cfg.ready }, to, cfg.verifyTimeout,
+                  (v) => versionMatchesTag(v, to),
+                )
+                return withDetail(to, {
+                  rolledBackTo: to,
+                  verified: back,
+                  note: "the database was not rolled back; migrations roll forward",
+                  backup: backupResult,
+                })
               })
-            })
+            } catch (rollbackErr) {
+              // Never instead of the verify failure: that is why production is in this state.
+              throw rollbackFailed(err, to, rollbackErr)
+            }
           } else {
             r.skip("rollback", "no previous version was recorded to roll back to")
           }
@@ -505,7 +533,27 @@ export class Shipkit {
       if (only("clean")) {
         await r.stage("clean", async () => {
           const summary = await cleanServer(source, target, sshKey, tag, registryToken, kamalSecrets)
-          return withDetail(summary, { pruned: summary })
+          let retain = 5
+          try {
+            retain = parseRetainContainers(await source.file("config/deploy.yml").contents())
+          } catch {
+            // No deploy.yml: Kamal's default applies.
+          }
+          // The rollback window is what survived the prune, read the way `kamal rollback`
+          // reads it. Losing the version this deploy replaced leaves the next incident with
+          // nothing to go back to, and is a failure rather than a note (C12).
+          const available = await availableVersions(target, sshKey, cfg.service)
+          const window = available.filter((v) => v !== tag)
+          // Only a tag the kit minted can be found by name; anything else was not deployed by
+          // it, and a rollback to it is refused regardless (versionMatchesTag).
+          const replaced = previousVersion && /^sha-[0-9a-f]{7,40}$/.test(previousVersion) ? previousVersion : null
+          if (replaced && replaced !== tag && !window.includes(replaced)) {
+            throw gateError(
+              `clean removed ${replaced}, the version this deploy replaced: there is nothing to roll back to`,
+              "Set retain_containers in config/deploy.yml (Kamal's default is 5) and check what else prunes containers on the server.",
+            )
+          }
+          return withDetail(summary, { pruned: summary, retainContainers: retain, rollbackWindow: window })
         })
       } else r.skip("clean", "not selected")
 
@@ -611,21 +659,19 @@ export class Shipkit {
         )
       }
 
-      // `kamal rollback` over a pruned image exits 0 and changes nothing, and the deploy's own
-      // clean stage is what prunes it. Asked here so the refusal names the real reason instead
-      // of arriving as a failed verify (#11).
-      const imageRef = `${cfg.registry}:${toVersion}`
-      const present = parseVersionProbe(
-        await sshContainer(target, sshKey)
-          .withExec(["sh", "-c", remoteScript(target, versionProbeScript(imageRef))])
-          .stdout(),
+      // `kamal rollback` to a version with no container exits 0 and changes nothing. Asked
+      // here, the way Kamal asks, so the refusal names the real reason instead of arriving as
+      // a failed verify (#11, C12). What else could be rolled back to is part of the answer.
+      const available = (await availableVersions(target, sshKey, cfg.service)).filter(
+        (v) => !versionMatchesTag(before, v),
       )
-      if (!present) {
+      r.set("available", available)
+      if (!available.includes(toVersion)) {
         throw new ShipkitError(
           EXIT.GATE,
-          `${toVersion} is not on the server any more`,
-          "The deploy's clean stage prunes old images, so it is no longer there to roll back to. " +
-            "Deploy that commit again instead — it is still in the registry.",
+          `${toVersion} is not on the server any more (${available.length} version(s) available: ${available.join(", ") || "none"})`,
+          "Kamal keeps the newest retain_containers stopped containers (config/deploy.yml, default 5) " +
+            "and prunes the rest. Deploy that commit again instead — it is still in the registry.",
         )
       }
 
@@ -635,15 +681,18 @@ export class Shipkit {
       })
 
       await r.stage("verify", async () => {
-        const after = await servingHealth(target, cfg.health)
-        if (!versionMatchesTag(after, toVersion)) {
-          throw new ShipkitError(
-            EXIT.GATE,
-            `rolled back to ${toVersion} but ${after ?? "nothing"} is answering`,
-            "The old version did not take. Check `kamal app version` on the server before trying again.",
+        try {
+          const after = await verifyHealth(
+            target, { health: cfg.health, ready: cfg.ready }, toVersion, cfg.verifyTimeout,
+            (v) => versionMatchesTag(v, toVersion),
           )
+          return withDetail(after.version, { verified: after })
+        } catch (err) {
+          if (err instanceof ShipkitError) {
+            err.next = "The old version did not take, or cannot reach the database. Check `kamal app version` on the server before trying again."
+          }
+          throw err
         }
-        return after!
       })
 
       r.set("schema", "untouched — migrations roll forward (docs/runbooks/restore.md)")

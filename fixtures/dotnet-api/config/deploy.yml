@@ -34,6 +34,11 @@ registry:
 builder:
   arch: arm64
 
+# The rollback window. `kamal prune all` (the deploy's clean stage) keeps this many stopped
+# containers and the images they use; `kamal rollback` can only boot a version whose container
+# survived. Kamal's default, written out so nobody lowers it without seeing what it costs.
+retain_containers: 5
+
 env:
   clear:
     ConnectionStrings__Default: "Host=shipkit-fixture-db;Port=5432;Database=app;Username=postgres;Password=postgres"

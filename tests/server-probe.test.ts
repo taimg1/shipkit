@@ -1,11 +1,12 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import {
+  containerVersionsScript,
+  parseContainerVersions,
+  parseRetainContainers,
   parseServerProbe,
-  parseVersionProbe,
   provisioning,
   serverProbeScript,
-  versionProbeScript,
 } from "../.dagger/src/core/server-probe.ts"
 
 const AMD64 = "linux/amd64"
@@ -88,20 +89,44 @@ test("matching architectures pass without adding a step", () => {
   assert.deepEqual(provisioning(state(), true, AMD64), { ok: true, steps: [] })
 })
 
-// #11: the deploy's clean stage prunes old images, so a rollback target can simply be gone —
-// and `kamal rollback` exits 0 over a missing image, changing nothing.
-test("asks docker whether the image is still there", () => {
-  const s = versionProbeScript("ghcr.io/owner/app:sha-a1b2c3d")
-  assert.match(s, /docker image inspect/)
-  assert.match(s, /ghcr\.io\/owner\/app:sha-a1b2c3d/)
+// #11, C12: `kamal rollback` boots a CONTAINER named after the version, and exits 0 when there
+// is none. The window is what containers exist, not what images do.
+test("asks docker for the service's containers, running or not", () => {
+  const s = containerVersionsScript("client-api")
+  assert.match(s, /docker ps -a/)
+  assert.match(s, /label=service=client-api/)
 })
 
-test("the image reference is quoted, not interpolated into a shell", () => {
-  assert.match(versionProbeScript("ghcr.io/o/a:sha-1'; rm -rf /"), /'\\''/)
+test("the service name is quoted, not interpolated into a shell", () => {
+  assert.match(containerVersionsScript("x'; rm -rf /"), /'\\''/)
 })
 
-test("present is present, and anything else is not", () => {
-  assert.equal(parseVersionProbe("image:yes\n"), true)
-  assert.equal(parseVersionProbe("image:no\n"), false)
-  assert.equal(parseVersionProbe(""), false)
+test("versions come from container names, newest first, once each", () => {
+  const out = [
+    "containers:begin",
+    "client-api-web-sha-a1b2c3d",
+    "client-api-web-sha-9f8e7d6",
+    "client-api-worker-sha-9f8e7d6",
+    "containers:end",
+  ].join("\n")
+  assert.deepEqual(parseContainerVersions(out), ["sha-a1b2c3d", "sha-9f8e7d6"])
+})
+
+test("a container Kamal parked as replaced is not a rollback target", () => {
+  const out = "containers:begin\nclient-api-web-sha-a1b2c3d_replaced_4f2a91\ncontainers:end\n"
+  assert.deepEqual(parseContainerVersions(out), [])
+})
+
+test("an empty list is empty, and silence is not an empty list", () => {
+  assert.deepEqual(parseContainerVersions("containers:begin\ncontainers:end\n"), [])
+  assert.equal(parseContainerVersions(""), null)
+  assert.equal(parseContainerVersions("containers:begin\nclient-api-web-sha-a1b2c3d\n"), null)
+})
+
+test("retain_containers is read from deploy.yml, with Kamal's default of 5", () => {
+  assert.equal(parseRetainContainers("service: x\nretain_containers: 3\n"), 3)
+  assert.equal(parseRetainContainers("retain_containers: 7   # keep a week of deploys\n"), 7)
+  assert.equal(parseRetainContainers("service: x\n"), 5)
+  // Indented under another key is not the top-level setting.
+  assert.equal(parseRetainContainers("proxy:\n  retain_containers: 1\n"), 5)
 })

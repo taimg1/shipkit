@@ -45,3 +45,31 @@ export function parseStages(spec: string | undefined, known: string[]): StageSel
 export function stageRuns(selection: StageSelection, name: string): boolean {
   return selection.selected === null || selection.selected.has(name)
 }
+
+/**
+ * Deploy selections that name real stages and still cannot mean anything (D-06). Both used to
+ * be accepted: `--stage=rollback` asked for a plan token and then ran nothing, and provisioning
+ * ran whenever the plan had it, whatever was selected.
+ *
+ * Called before the plan exists (no provisioning known yet) and again once it does.
+ */
+export function deploySelectionProblem(
+  selection: StageSelection,
+  plannedProvision: readonly string[],
+): { message: string; next: string } | null {
+  if (selection.selected?.has("rollback")) {
+    return {
+      message: "rollback cannot be selected as a deploy stage",
+      next:
+        "A deploy rolls back on its own when verify fails. To put a previous version back by " +
+        "hand: `shipkit rollback sha-<previous>` (docs/runbooks/rollback.md).",
+    }
+  }
+  if (plannedProvision.length > 0 && !stageRuns(selection, "provision")) {
+    return {
+      message: `the plan provisions the server first (${plannedProvision.join("; ")}) and --stage leaves provision out`,
+      next: "Add provision to --stage, or deploy without --stage.",
+    }
+  }
+  return null
+}

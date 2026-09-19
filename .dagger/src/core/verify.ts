@@ -1,12 +1,20 @@
 import { dag, ReturnType } from "@dagger.io/dagger"
 import { Environment } from "../config.js"
-import { verifyFailed } from "./gates.js"
-import { readVersion } from "./health.js"
+import { notReady, verifyFailed } from "./gates.js"
+import { judge, parseProbe, probeScript, readVersion, Verdict } from "./health.js"
 
 export interface VerifyResult {
   version: string
   attempts: number
   url: string
+  /** The readiness URL that answered 200, when one is configured. */
+  ready?: string
+}
+
+export interface VerifyPaths {
+  health: string
+  /** Readiness path. Required by config whenever there is a database. */
+  ready?: string
 }
 
 /**
@@ -14,43 +22,52 @@ export interface VerifyResult {
  *
  * It does not check for 200. A 200 from the PREVIOUS container is the failure this exists
  * to catch: the release did not take, the old version is still serving, and every
- * status-code check in the world calls that a success. The only question worth asking is
- * whether the SHA that was just deployed is the one answering.
+ * status-code check in the world calls that a success. The question is whether the SHA that
+ * was just deployed is the one answering — and, since /health touches nothing, whether it can
+ * reach its database at all (C4): `ready` must answer 200 too.
+ *
+ * Everything short of both is retried until `timeoutSeconds`, a stale version included (B20).
+ * Only when the deadline passes does the last observation become the verdict.
+ *
+ * `matches` decides what counts as the expected version: equality with the SHA after a
+ * release, a tag prefix after a rollback (see versionMatchesTag).
  */
 export async function verify(
   env: Environment,
-  healthPath: string,
+  paths: VerifyPaths,
   expected: string,
-  attempts = 20,
+  timeoutSeconds: number,
+  matches: (version: string) => boolean = (v) => v === expected,
   intervalSeconds = 3,
 ): Promise<VerifyResult> {
-  const url = `${env.url.replace(/\/$/, "")}${healthPath}`
+  const base = env.url.replace(/\/$/, "")
+  const url = `${base}${paths.health}`
+  const readyUrl = paths.ready ? `${base}${paths.ready}` : null
+  const script = probeScript(url, readyUrl)
 
-  const script =
-    `for i in $(seq 1 ${attempts}); do\n` +
-    `  body=$(curl -fsS --max-time 5 "${url}" 2>/dev/null) && {\n` +
-    `    echo "$body"; exit 0; }\n` +
-    `  sleep ${intervalSeconds}\n` +
-    `done\n` +
-    `echo "__unreachable__"\n`
+  const curl = dag.container().from("alpine:3.21").withExec(["apk", "add", "--no-cache", "curl"])
+  const deadline = Date.now() + timeoutSeconds * 1000
+  let attempts = 0
+  let last: Verdict
 
-  const out = await dag
-    .container()
-    .from("alpine:3.21")
-    .withExec(["apk", "add", "--no-cache", "curl"])
-    .withEnvVariable("SHIPKIT_NO_CACHE", Date.now().toString())
-    .withExec(["sh", "-c", script], { expect: ReturnType.Any })
-    .stdout()
-
-  const body = out.trim()
-  if (body === "__unreachable__" || body.length === 0) {
-    throw verifyFailed(expected, null)
+  for (;;) {
+    attempts++
+    const out = await curl
+      .withEnvVariable("SHIPKIT_NO_CACHE", `${Date.now()}-${attempts}`)
+      .withExec(["sh", "-c", script], { expect: ReturnType.Any })
+      .stdout()
+    last = judge(parseProbe(out, readyUrl !== null), matches)
+    if (last.ok) return { version: last.version, attempts, url, ...(readyUrl ? { ready: readyUrl } : {}) }
+    if (Date.now() + intervalSeconds * 1000 >= deadline) break
+    await new Promise((resolve) => setTimeout(resolve, intervalSeconds * 1000))
   }
 
-  const version = readVersion(body)
-  if (version !== expected) throw verifyFailed(expected, version)
-
-  return { version, attempts, url }
+  const err =
+    last.why === "not-ready"
+      ? notReady(paths.ready!, last.readyStatus ?? 0, last.version!)
+      : verifyFailed(expected, last.version)
+  err.detail = { attempts, timeoutSeconds, url, ...(readyUrl ? { ready: readyUrl } : {}) }
+  throw err
 }
 
 export { readVersion } from "./health.js"

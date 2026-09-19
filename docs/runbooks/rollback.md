@@ -18,24 +18,43 @@ curl https://api.client.com/health   # what is actually answering
 If those disagree, trust `/health` and work out why before rolling anywhere. Kamal derives
 its answer from the `latest` tag, and a rollback targets the tag.
 
-## The window is shorter than you think
+## The window is `retain_containers` deploys long
 
-**A deploy prunes old images, including the one you would roll back to.** `clean` runs
-`kamal prune all` at the end of every deploy, and in practice a version from two deploys ago is
-simply not on the server any more.
+`kamal rollback` does not need an image, it needs a **container**: it boots the stopped
+`<service>-<role>-<version>` container a previous deploy left behind. `clean` runs
+`kamal prune all` at the end of every deploy, which keeps the newest `retain_containers`
+stopped containers (config/deploy.yml; Kamal's default is 5) and every image one of them uses,
+and removes the rest. So the window is that many previous versions, not one.
 
-`kamal rollback` over a missing image **exits 0 and changes nothing**, so the kit asks the
-server first and refuses with the reason:
+After pruning, `clean` lists what is left and fails the deploy if the version it replaced is
+gone — the stage entry carries `rollbackWindow`. `shipkit rollback` reads the same list and
+says how many versions it could go back to.
+
+Before the kit checked, it looked for an image by `registry` from shipkit.yaml — which is not
+necessarily the repository Kamal pulled from — and that, rather than pruning, is the likeliest
+reason an earlier drill found versions "not on the server any more". This has not been
+re-confirmed against a server.
+
+`kamal rollback` to a version with no container **exits 0 and changes nothing**, so the kit asks
+the server first and refuses with the reason:
 
 ```
-FAILED  sha-68b1faa is not on the server any more
-next: The deploy's clean stage prunes old images, so it is no longer there to roll back to.
-      Deploy that commit again instead — it is still in the registry.
+FAILED  sha-68b1faa is not on the server any more (2 version(s) available: sha-47388f5, sha-1c0ffee)
+next: Kamal keeps the newest retain_containers stopped containers (config/deploy.yml, default 5)
+      and prunes the rest. Deploy that commit again instead — it is still in the registry.
 ```
 
 That advice is the real recovery path in most cases: the image is still in the registry, and
 deploying that commit again goes through the gates rather than around them. It is slower and it
 is honest.
+
+## How a rollback is proven
+
+The rollback ends with the same `verify` a release does: the tag it put back must be what
+`/health` reports, and the readiness path must answer 200, retried for up to `verifyTimeout`
+seconds. The automatic rollback inside a deploy runs it too. When the rollback fails, the deploy
+reports both failures — the verify that triggered it first, because that is why production is
+in this state — and exits 1.
 
 ## What has and has not been exercised
 

@@ -33,6 +33,15 @@ publish: true
 # a failed deploy that looks green.
 health: /health
 
+# Required unless db is "none": an endpoint that answers 200 only when the application can
+# reach its database. /health deliberately touches nothing, so on its own it passes a release
+# with a wrong connection string. verify requires both after every release and every rollback.
+ready: /health/ready
+
+# How long verify keeps retrying — unreachable, the previous version still answering, or not
+# ready yet — before the release is declared failed and rolled back. Seconds, 1–600.
+verifyTimeout: 60
+
 environments:
   prod:
     url: https://api.client.com

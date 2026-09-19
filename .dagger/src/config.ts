@@ -1,6 +1,7 @@
 import { Directory } from "@dagger.io/dagger"
 import { parse } from "yaml"
 import { configError } from "./errors.js"
+import { verifySettings } from "./core/health.js"
 
 export type StackName = "dotnet" | "nest" | "next" | "custom"
 export type DbKind = "postgres" | "none"
@@ -13,6 +14,13 @@ export interface Config {
   db: DbKind
   delivery: Delivery
   health: string
+  /**
+   * Readiness path: 200 only when the application can reach its database. Required unless
+   * db is "none"; `verify` demands it after every release, on top of the version on `health`.
+   */
+  ready?: string
+  /** Seconds `verify` keeps retrying before the release is declared failed. Default 60. */
+  verifyTimeout: number
   /** Path to the startup project — required by `dotnet ef`, never guessed. */
   project: string
   /** Path to the project holding the migrations. Differs from `project` in most solutions. */
@@ -118,6 +126,9 @@ export async function loadConfig(source: Directory): Promise<Config> {
     throw configError(`delivery must be "kamal" or "static"`)
   }
 
+  const verifyCfg = verifySettings(c, db)
+  if (!verifyCfg.ok) throw configError(verifyCfg.message, verifyCfg.next)
+
   const service = (c.service as string) ?? ""
   const rawEnvironments = (c.environments ?? {}) as Record<string, Record<string, unknown>>
   const environments: Record<string, Environment> = {}
@@ -156,6 +167,8 @@ export async function loadConfig(source: Directory): Promise<Config> {
     db,
     delivery,
     health: (c.health as string) ?? "/health",
+    ready: verifyCfg.ready,
+    verifyTimeout: verifyCfg.verifyTimeout,
     project: req(c, "project"),
     migrationsProject: c.migrationsProject as string | undefined,
     dockerfile: (c.dockerfile as string) ?? "Dockerfile",

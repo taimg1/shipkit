@@ -46,7 +46,12 @@ The application and the migration bundle both hold it, so they change together:
 1. Change it in PostgreSQL: `ALTER ROLE <user> WITH PASSWORD '<new>';`
 2. Update `SHIPKIT_DATABASE_URL` in the CI store.
 3. Update the value Kamal injects into the application.
-4. Deploy. `verify` proves the application still reaches the database.
+4. Deploy. `verify` requires a 200 from the readiness path (`ready:` in shipkit.yaml, e.g.
+   `/health/ready`) from the new release, so a release holding the wrong password fails the
+   gate and is rolled back. It does **not** prove the password works for anything beyond the
+   query the readiness endpoint runs, and the rollback puts back a version that holds the
+   *old* value — which, after step 1, cannot connect either. The rollback's own verify says
+   so, and the run reports both failures: fix the value and deploy forward.
 
 Between steps 1 and 4 the running application has a stale password. Plan for the gap or
 create a second role, move to it, and drop the first.

@@ -24,7 +24,13 @@ different machine at the same one.
 Watching `/health` alone is not enough, and this is not theoretical: during the restore drill
 on 2026-09-12 the production schema was dropped entirely, and `/health` kept answering 200
 throughout while the application could serve nothing. It reports the running version and
-touches no dependency — which is exactly right for the deploy gate, and useless as an alarm.
+touches no dependency, which makes it useless as an alarm.
+
+The deploy gate uses both. `verify` requires the new version on `/health` **and** a 200 from
+the readiness path (`ready:` in shipkit.yaml) before a release counts, and retries either for up
+to `verifyTimeout` seconds (default 60). Before that, a release that could not reach its database
+passed `verify` as long as it reported the right version. Monitoring is still needed: `verify`
+looks once, at deploy time.
 
 Suggested settings: 60s interval, 2 retries before alerting, and a notification channel that
 reaches someone who is not looking at a dashboard.

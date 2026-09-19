@@ -171,18 +171,52 @@ export function provisioning(state: ServerState, needsDb: boolean, building: str
 }
 
 /**
- * Whether a version is still on the server to be rolled back to.
+ * Which versions the server can actually roll back to, newest first.
  *
- * `kamal rollback` to a version whose image was pruned exits 0 and changes nothing. The deploy's
- * own `clean` stage is what prunes it, so the pipeline deletes its own rollback targets and then
- * reports success when asked to use one (#11). Verify catches it afterwards; this catches it
- * before, which is the difference between a clear refusal and a confusing one mid-incident.
+ * `kamal rollback` does not look for an image: it looks for a CONTAINER named
+ * `<service>-<role>-<version>` and boots it, and when there is none it prints a line in red and
+ * exits 0 (kamal 2.12, cli/main.rb `container_available?`). An image-presence check answers a
+ * different question — and asked it by `registry` from shipkit.yaml, which need not be the
+ * repository Kamal pulled from. So the window is read the way Kamal reads it: containers
+ * labelled with the service, versions taken from their names (C12).
+ *
+ * The markers make silence distinguishable from an empty list, for the same reason as the
+ * server probe: a server the kit could not talk to must not read as one with nothing on it.
  */
-export function versionProbeScript(imageRef: string): string {
+export function containerVersionsScript(service: string): string {
   const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
-  return `docker image inspect ${q(imageRef)} >/dev/null 2>&1 && echo image:yes || echo image:no`
+  return [
+    "echo containers:begin",
+    `docker ps -a --filter ${q(`label=service=${service}`)} --format '{{.Names}}'`,
+    "echo containers:end",
+  ].join("\n")
 }
 
-export function parseVersionProbe(output: string): boolean {
-  return output.split("\n").some((line) => line.trim() === "image:yes")
+/**
+ * The versions in a `containerVersionsScript` answer, or null when the answer is incomplete.
+ *
+ * Only names ending in a tag the kit mints count. Kamal parks a container it replaced under
+ * `<name>_replaced_<hex>`, which is not something `kamal rollback` will boot.
+ */
+export function parseContainerVersions(output: string): string[] | null {
+  const lines = output.split("\n").map((l) => l.trim())
+  const begin = lines.indexOf("containers:begin")
+  const end = lines.indexOf("containers:end")
+  if (begin === -1 || end < begin) return null
+  const versions: string[] = []
+  for (const name of lines.slice(begin + 1, end)) {
+    const m = /-(sha-[0-9a-f]{7,40})$/.exec(name)
+    if (m && !versions.includes(m[1])) versions.push(m[1])
+  }
+  return versions
+}
+
+/**
+ * `retain_containers` from config/deploy.yml: how many stopped containers — and so how many
+ * versions — `kamal prune all` leaves behind. Kamal's default is 5; it refuses anything below 1.
+ * Top-level key, read like parseKamalSsh reads its block, without a YAML parser.
+ */
+export function parseRetainContainers(deployYml: string): number {
+  const m = /^retain_containers:[ \t]*(\d+)[ \t]*(#.*)?$/m.exec(deployYml)
+  return m ? Number(m[1]) : 5
 }

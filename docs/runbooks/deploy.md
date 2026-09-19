@@ -36,7 +36,16 @@ merged, production moved under you — the token stops matching and the deploy r
 
 ## What runs
 
-`backup` → `migrate` → `release` → `verify` → `rollback` (only if verify fails) → `clean`.
+`provision` (only when the plan says so) → `backup` → `migrate` → `release` → `verify` →
+`rollback` (only if verify fails) → `clean`.
+
+`verify` passes only when `/health` reports the SHA just deployed **and** the readiness path
+(`ready:` in shipkit.yaml) answers 200 — the new release can reach its database. It retries
+both for up to `verifyTimeout` seconds (default 60) before failing.
+
+`--stage` selects a subset. `rollback` cannot be selected — it only ever follows a failed
+verify; use `shipkit rollback` instead. A plan that provisions the server refuses a selection
+that leaves `provision` out.
 
 Everything before `release` is recoverable: a failed backup or a failed migration leaves the
 old version serving and production untouched.
@@ -51,7 +60,8 @@ old version serving and production untouched.
 | 4 | Needs confirmation | Run `--plan`, read it, then `--yes=<token>` |
 
 A failed `verify` triggers a rollback automatically and the run still ends red. That is
-correct: the deploy did not happen, and a green run would say it did.
+correct: the deploy did not happen, and a green run would say it did. The rollback is verified
+the same way; if it fails too, the report carries both errors and the run exits 1.
 
 ## For agents
 

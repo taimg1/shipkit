@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { parseStages, stageRuns } from "../.dagger/src/core/stage-select.ts"
+import { deploySelectionProblem, parseStages, stageRuns } from "../.dagger/src/core/stage-select.ts"
 
 const CI = ["pre", "build", "test", "db", "push"]
 
@@ -40,4 +40,27 @@ test("an unknown stage is reported, never ignored", () => {
 
 test("an empty --stage is refused rather than read as all or none", () => {
   assert.deepEqual(parseStages("", CI).unknown, [""])
+})
+
+// D-06: names that are stages of `deploy` and still cannot be asked for on their own.
+const DEPLOY = ["provision", "backup", "migrate", "release", "verify", "rollback", "clean"]
+const BOOT = ["boot the database accessory (first deploy to this server)"]
+
+test("rollback is refused as a selection, alone or with others", () => {
+  assert.match(deploySelectionProblem(parseStages("rollback", DEPLOY), [])!.message, /rollback cannot be selected/)
+  assert.notEqual(deploySelectionProblem(parseStages("verify,rollback", DEPLOY), []), null)
+})
+
+test("a full deploy has nothing to refuse, provisioning or not", () => {
+  assert.equal(deploySelectionProblem(parseStages(undefined, DEPLOY), BOOT), null)
+})
+
+test("a selection that skips provisioning the plan needs is refused", () => {
+  assert.match(deploySelectionProblem(parseStages("migrate", DEPLOY), BOOT)!.message, /leaves provision out/)
+})
+
+test("provision selected, or nothing to provision, is fine", () => {
+  assert.equal(deploySelectionProblem(parseStages("provision,migrate", DEPLOY), BOOT), null)
+  assert.equal(deploySelectionProblem(parseStages("migrate", DEPLOY), []), null)
+  assert.equal(deploySelectionProblem(parseStages("provision", DEPLOY), []), null)
 })

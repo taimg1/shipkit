@@ -36,10 +36,14 @@ health: /health
 environments:
   prod:
     url: https://api.client.com
-    # host and hostKey are added together once the server exists. A host without its hostKey
-    # is a config error: every SSH connection verifies the server against this line and
-    # refuses anything else.
-    # host: 203.0.113.10
-    # sshPort: 22
+    # Once the server exists. These values are used in shell commands, so each one is checked
+    # for shape when shipkit.yaml is loaded: a hostname or IP, a login name, a port from 1 to
+    # 65535, plain Docker/PostgreSQL names. Anything else is a config error, not a guess.
+    # host and hostKey are added together: a host without its hostKey is a config error, since
+    # every SSH connection verifies the server against this line and refuses anything else.
+    # host: api.client.com
     # sshUser: deploy
-    # hostKey: "203.0.113.10 ssh-ed25519 AAAA..."   # from server/bootstrap.sh's output
+    # sshPort: 22
+    # hostKey: "api.client.com ssh-ed25519 AAAA..."   # from server/bootstrap.sh's output
+    # database: app
+    # dbUser: postgres

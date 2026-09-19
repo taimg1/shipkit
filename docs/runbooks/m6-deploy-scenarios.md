@@ -12,6 +12,10 @@ shipkit deploy                 # exit 4: this would change production and has no
 shipkit deploy --yes=<token>   # runs it
 ```
 
+> Since this run the fixture no longer connects as `postgres` with a password in `env.clear`:
+> the application uses an `app` role and its connection string is a secret. Rerunning these
+> scenarios needs the exports in `fixtures/dotnet-api/README.md`, "Deploying to dev-server".
+
 ## The three scenarios the plan asked for
 
 ### 1. A normal change

@@ -2,6 +2,7 @@ import { dag, ReturnType } from "@dagger.io/dagger"
 import { Environment } from "../config.js"
 import { verifyFailed } from "./gates.js"
 import { readVersion } from "./health.js"
+import { shq } from "./ssh-command.js"
 
 export interface VerifyResult {
   version: string
@@ -28,7 +29,7 @@ export async function verify(
 
   const script =
     `for i in $(seq 1 ${attempts}); do\n` +
-    `  body=$(curl -fsS --max-time 5 "${url}" 2>/dev/null) && {\n` +
+    `  body=$(curl -fsS --max-time 5 ${shq(url)} 2>/dev/null) && {\n` +
     `    echo "$body"; exit 0; }\n` +
     `  sleep ${intervalSeconds}\n` +
     `done\n` +
@@ -71,7 +72,7 @@ export async function servingVersion(
     .from("alpine:3.21")
     .withExec(["apk", "add", "--no-cache", "curl"])
     .withEnvVariable("SHIPKIT_NO_CACHE", Date.now().toString())
-    .withExec(["sh", "-c", `curl -fsS --max-time 5 "${url}" || true`], { expect: ReturnType.Any })
+    .withExec(["sh", "-c", `curl -fsS --max-time 5 ${shq(url)} || true`], { expect: ReturnType.Any })
     .stdout()
   return readVersion(out.trim())
 }

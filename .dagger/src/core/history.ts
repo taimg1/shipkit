@@ -3,7 +3,7 @@ import { Environment } from "../config.js"
 import { DbAdapter } from "../adapters/types.js"
 import { EXIT, ShipkitError } from "../errors.js"
 import { historyProbeSql, lastAppliedSql, parseHistoryProbe } from "./history-probe.js"
-import { remoteScript, sshContainer } from "./ssh.js"
+import { remoteScript, shq, sshContainer } from "./ssh.js"
 
 /**
  * The last migration production has applied, read from the database itself (decision D5).
@@ -48,7 +48,7 @@ export async function lastApplied(
  */
 async function runSql(env: Environment, key: Secret, sql: string): Promise<string> {
   const script =
-    `docker exec -i ${env.dbContainer} psql -U ${env.dbUser} -d ${env.database} ` +
+    `docker exec -i ${shq(env.dbContainer ?? "")} psql -U ${shq(env.dbUser)} -d ${shq(env.database)} ` +
     `-v ON_ERROR_STOP=1 -tA <<'SHIPKIT_SQL'\n${sql}\nSHIPKIT_SQL\n`
 
   return sshContainer(env, key)

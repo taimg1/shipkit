@@ -1,7 +1,7 @@
 import { Secret } from "@dagger.io/dagger"
 import { Environment } from "../config.js"
 import { infraError } from "../errors.js"
-import { remoteScript, sshContainer } from "./ssh.js"
+import { remoteScript, shq, sshContainer } from "./ssh.js"
 
 /**
  * Waits until production's database container accepts connections.
@@ -12,7 +12,7 @@ import { remoteScript, sshContainer } from "./ssh.js"
 export async function waitForDatabase(env: Environment, key: Secret, seconds = 90): Promise<void> {
   const script =
     `i=0; while [ $i -lt ${seconds} ]; do ` +
-    `docker exec ${env.dbContainer} pg_isready -U ${env.dbUser} -d ${env.database} >/dev/null 2>&1 && exit 0; ` +
+    `docker exec ${shq(env.dbContainer ?? "")} pg_isready -U ${shq(env.dbUser)} -d ${shq(env.database)} >/dev/null 2>&1 && exit 0; ` +
     `i=$((i+1)); sleep 1; done; exit 1`
   try {
     await sshContainer(env, key).withExec(["sh", "-c", remoteScript(env, script)]).sync()

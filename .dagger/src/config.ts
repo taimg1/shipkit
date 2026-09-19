@@ -2,6 +2,7 @@ import { Directory } from "@dagger.io/dagger"
 import { parse } from "yaml"
 import { configError } from "./errors.js"
 import { hostKeyHint, parseKnownHosts } from "./core/known-hosts.js"
+import { configProblem } from "./config-validate.js"
 
 export type StackName = "dotnet" | "nest" | "next" | "custom"
 export type DbKind = "postgres" | "none"
@@ -172,7 +173,7 @@ export async function loadConfig(source: Directory): Promise<Config> {
     }
   }
 
-  return {
+  const config: Config = {
     kit: c.kit as string | undefined,
     stack: stack as StackName,
     db,
@@ -189,6 +190,10 @@ export async function loadConfig(source: Directory): Promise<Config> {
     publish: c.publish === undefined ? true : c.publish === true,
     environments,
   }
+  // Every value that reaches a shell is checked for shape here, before anything runs.
+  const problem = configProblem(config)
+  if (problem) throw configError(problem.message, problem.next)
+  return config
 }
 
 function req(c: Record<string, unknown>, key: string): string {

@@ -39,6 +39,46 @@ curl localhost:8080/orders          # []
 Until migrations are applied, `/orders` returns 500 while `/health` returns 200. That is the
 correct behaviour, not a bug: nothing in this project applies migrations at startup.
 
+## Deploying to dev-server
+
+`.kamal/secrets` holds references, not passwords, and the kit refuses to deploy while any of
+them has nothing behind it. For the simulated host, export throwaway values first:
+
+```bash
+export SHIPKIT_SSH_KEY=dev-server/.ssh/id_ed25519
+export POSTGRES_PASSWORD=dev-only-owner-password
+export APP_DB_PASSWORD=dev-only-app-password
+# The application connects as `app`: rows in and out, no DDL.
+export APP_DATABASE_URL="Host=shipkit-fixture-db;Port=5432;Database=app;Username=app;Password=$APP_DB_PASSWORD"
+# The migration bundle connects as the owner, because migrations are DDL.
+export SHIPKIT_DATABASE_URL="Host=shipkit-fixture-db;Port=5432;Database=app;Username=postgres;Password=$POSTGRES_PASSWORD"
+
+shipkit deploy --plan
+```
+
+The `app` role is created by `config/postgres/create-app-role.sh`, which PostgreSQL runs when it
+initialises an empty data directory — that is, when the deploy boots the database accessory
+for the first time. Default privileges on the owner mean every table a migration creates is
+readable and writable by `app` with no further grants.
+
+A database that already existed before this script was added does not run it. Create the role
+once, by hand, with the same grants plus the tables that already exist. `\password` prompts for
+the password, so it never appears in a command line or shell history:
+
+```bash
+ssh -t deploy@HOST docker exec -it shipkit-fixture-db psql -U postgres -d app
+```
+
+```sql
+CREATE ROLE app LOGIN;
+\password app
+GRANT USAGE ON SCHEMA public TO app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO app;
+```
+
 ## Constraints discovered while building it
 
 Each of these cost a failed command, and each applies to any client project the kit runs on.

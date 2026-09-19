@@ -32,7 +32,8 @@ import {
 } from "./core/release.js"
 import { verify as verifyHealth } from "./core/verify.js"
 import { buildPlan, renderPlan } from "./core/plan.js"
-import { KamalSsh, checkSsh, declaredSecrets, missingSecrets, parseKamalSsh } from "./core/kamal-config.js"
+import { KamalSsh, checkSsh, declaredSecrets, kamalHostKeyProblem, missingSecrets, parseKamalSsh } from "./core/kamal-config.js"
+import { checkHostKey } from "./core/known-hosts.js"
 import { StackAdapter } from "./adapters/types.js"
 
 /** Config, adapter and environment, resolved once and validated together. */
@@ -716,11 +717,19 @@ export class Shipkit {
         checks["stackVersion"] = `WARN project directory unreadable; ${cfg.stackVersion} not checked`
       }
 
+      // The pinned host key must be a key for the host and port ssh will actually look up.
+      for (const [name, env] of Object.entries(cfg.environments)) {
+        if (env.host) checks[`hostKey ${name}`] = checkHostKey(name, env)
+      }
+
       // The kit and Kamal both SSH to the server; they must agree on how (#15).
       if (cfg.delivery === "kamal") {
         let kamal: KamalSsh | null = null
         try {
-          kamal = parseKamalSsh(await source.file("config/deploy.yml").contents())
+          const deployYml = await source.file("config/deploy.yml").contents()
+          kamal = parseKamalSsh(deployYml)
+          const problem = kamalHostKeyProblem(deployYml)
+          checks["kamal host keys"] = problem ? `MISMATCH (${problem})` : "ok (verified against hostKey)"
         } catch {
           // No deploy.yml yet: nothing to cross-check, the root warning still applies.
         }

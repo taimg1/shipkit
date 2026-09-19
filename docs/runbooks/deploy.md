@@ -50,6 +50,12 @@ old version serving and production untouched.
 | 3 | Infrastructure | The engine, the server, or the registry — retry after fixing |
 | 4 | Needs confirmation | Run `--plan`, read it, then `--yes=<token>` |
 
+**`Host key verification failed`** (or net-ssh's `HostKeyMismatch` from Kamal) means the
+server presented a key other than the one pinned as `hostKey` in `shipkit.yaml`. Treat it as a
+possible interception until proven otherwise: do not re-pin from what the deploy saw. If the
+server was rebuilt, take the new key from the server itself
+(`docs/runbooks/server-bootstrap.md` §4) and change `hostKey` in a reviewed commit.
+
 A failed `verify` triggers a rollback automatically and the run still ends red. That is
 correct: the deploy did not happen, and a green run would say it did.
 

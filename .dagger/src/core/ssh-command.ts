@@ -10,14 +10,23 @@ import type { Environment } from "../config.js"
  * the failure looked like an error.
  */
 
+/**
+ * Host-key checking for ssh and scp alike: only the pinned key (sshContainer writes it) and
+ * nothing learned along the way. `yes`, never `accept-new` — see core/known-hosts.ts.
+ */
+export const hostKeyOptions = [
+  "-o", "StrictHostKeyChecking=yes",
+  "-o", "UserKnownHostsFile=/root/.ssh/known_hosts",
+  "-o", "GlobalKnownHostsFile=/dev/null",
+]
+
 /** The ssh command prefix for this environment, as argv. */
 export function sshArgs(env: Environment): string[] {
   return [
     "ssh",
     "-i", "/root/.ssh/id_ed25519",
     "-p", String(env.sshPort),
-    "-o", "StrictHostKeyChecking=accept-new",
-    "-o", "UserKnownHostsFile=/root/.ssh/known_hosts",
+    ...hostKeyOptions,
     "-o", "BatchMode=yes",
     `${env.sshUser}@${env.host}`,
   ]

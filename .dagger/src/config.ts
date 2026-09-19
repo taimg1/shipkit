@@ -1,6 +1,7 @@
 import { Directory } from "@dagger.io/dagger"
 import { parse } from "yaml"
 import { configError } from "./errors.js"
+import { hostKeyHint, parseKnownHosts } from "./core/known-hosts.js"
 
 export type StackName = "dotnet" | "nest" | "next" | "custom"
 export type DbKind = "postgres" | "none"
@@ -60,6 +61,11 @@ export interface Environment {
   url: string
   /** SSH host. Absent until the environment is provisioned. */
   host?: string
+  /**
+   * known_hosts line(s) for `host`, committed with the project. Public, not a secret — and the
+   * only thing that tells the pipeline it is talking to the real server (core/known-hosts.ts).
+   */
+  hostKey?: string
   sshPort: number
   sshUser: string
   /** PostgreSQL container on the server. Defaults to Kamal's accessory naming. */
@@ -135,10 +141,26 @@ export async function loadConfig(source: Directory): Promise<Config> {
         'Add sshUser (e.g. "deploy") — the same user as ssh.user in config/deploy.yml.',
       )
     }
+    // No host without its key: without a pin every connection trusts whoever answers first.
+    const sshPort = Number(env.sshPort ?? 22)
+    if (env.host !== undefined && (typeof env.hostKey !== "string" || env.hostKey.trim() === "")) {
+      throw configError(
+        `environment "${name}" has a host but no hostKey`,
+        hostKeyHint(String(env.host), sshPort),
+      )
+    }
+    if (env.hostKey !== undefined) {
+      try {
+        parseKnownHosts(String(env.hostKey))
+      } catch (e) {
+        throw configError(`environment "${name}": ${(e as Error).message}`, hostKeyHint(String(env.host ?? "<host>"), sshPort))
+      }
+    }
     environments[name] = {
       url: env.url,
       host: env.host as string | undefined,
-      sshPort: Number(env.sshPort ?? 22),
+      hostKey: env.hostKey === undefined ? undefined : String(env.hostKey),
+      sshPort,
       sshUser: (env.sshUser as string) ?? "",
       // Kamal names an accessory's container "<service>-<accessory>" and puts it on a
       // network called "kamal". Deriving them keeps two more values out of every config,

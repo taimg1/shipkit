@@ -2,7 +2,7 @@ import { Container, Directory, Secret } from "@dagger.io/dagger"
 import { Config, Environment } from "../config.js"
 import { DbAdapter } from "../adapters/types.js"
 import { ShipkitError, EXIT } from "../errors.js"
-import { remoteScript, sshArgs, sshContainer } from "./ssh.js"
+import { hostKeyOptions, remoteScript, sshArgs, sshContainer } from "./ssh.js"
 import type { BackupResult } from "./backup.js"
 
 /**
@@ -54,8 +54,7 @@ export async function migrate(
   const ssh = sshArgs(env).join(" ")
 
   const scp =
-    `scp -i /root/.ssh/id_ed25519 -P ${env.sshPort} ` +
-    `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts ` +
+    `scp -i /root/.ssh/id_ed25519 -P ${env.sshPort} ${hostKeyOptions.join(" ")} ` +
     `/bundle/efbundle ${env.sshUser}@${env.host}:${remotePath}`
 
   // $SHIPKIT_DB_URL is expanded by the shell inside THIS container, where the value arrives

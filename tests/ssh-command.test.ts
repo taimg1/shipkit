@@ -1,6 +1,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { remoteScript, sshArgs } from "../.dagger/src/core/ssh-command.ts"
+import { readFileSync } from "node:fs"
+import { hostKeyOptions, remoteScript, sshArgs } from "../.dagger/src/core/ssh-command.ts"
 
 const env = {
   url: "http://example.test",
@@ -50,6 +51,17 @@ test("ssh args carry the port, the user and host-key checking", () => {
   const args = sshArgs(env).join(" ")
   assert.match(args, /-p 2222/)
   assert.match(args, /deploy@server\.example/)
-  assert.match(args, /StrictHostKeyChecking=accept-new/)
+  assert.match(args, /StrictHostKeyChecking=yes/)
+  assert.match(args, /UserKnownHostsFile=\/root\/\.ssh\/known_hosts/)
   assert.match(args, /BatchMode=yes/)
+})
+
+test("no ssh or scp anywhere trusts a host key on first sight", () => {
+  // accept-new against a known_hosts file that is empty in every fresh container is no check
+  // at all; `no` is worse. Only the pinned key (hostKey) may be accepted.
+  assert.doesNotMatch(hostKeyOptions.join(" "), /accept-new|StrictHostKeyChecking=no/)
+  for (const file of ["ssh-command.ts", "ssh.ts", "migrate.ts", "release.ts", "backup.ts", "plan.ts", "history.ts"]) {
+    const src = readFileSync(new URL(`../.dagger/src/core/${file}`, import.meta.url), "utf8")
+    assert.doesNotMatch(src, /StrictHostKeyChecking=(accept-new|no)\b/, file)
+  }
 })

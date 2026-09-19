@@ -1,6 +1,8 @@
 import { dag, Container, Directory, Secret } from "@dagger.io/dagger"
 import { Environment } from "../config.js"
-import { infraError } from "../errors.js"
+import { configError, infraError } from "../errors.js"
+import { hostKeyRefusal, kamalHostKeyProblem } from "./kamal-config.js"
+import { STRICT_SSH_CONFIG, hostKeyHint, knownHostsFor } from "./known-hosts.js"
 
 /**
  * Pinned. Kamal is the delivery layer; an unpinned delivery tool means a deploy can change
@@ -14,10 +16,14 @@ const KAMAL_IMAGE = "ghcr.io/basecamp/kamal:v2.12.0"
  * The kit passes `--version` and nothing else; `config/deploy.yml` belongs to the project
  * and is never edited from here (ADR 0001). What Kamal does with it — the proxy, the health
  * check, the container swap — is Kamal's business, and the kit does not reimplement any of it.
+ *
+ * It does not get to trust the server on sight, though. The pinned hostKey is its only
+ * known_hosts entry and ~/.ssh/config switches strict checking on; a deploy.yml that would stop
+ * Kamal reading that file is refused before Kamal runs (kamalHostKeyProblem).
  */
-export function kamal(
+export async function kamal(
   source: Directory,
-  _env: Environment,
+  env: Environment,
   key: Secret,
   registryPassword?: Secret,
   /**
@@ -26,13 +32,32 @@ export function kamal(
    * container has none of those variables (#19).
    */
   kamalSecrets?: Secret,
-): Container {
+): Promise<Container> {
+  let knownHosts: string
+  try {
+    knownHosts = knownHostsFor(env)
+  } catch (e) {
+    throw configError((e as Error).message, hostKeyHint(env.host ?? "<host>", env.sshPort))
+  }
+  let deployYml: string
+  try {
+    deployYml = await source.file("config/deploy.yml").contents()
+  } catch {
+    throw configError("config/deploy.yml not found", "Kamal needs it; see fixtures/dotnet-api/config/deploy.yml.")
+  }
+  const problem = kamalHostKeyProblem(deployYml)
+  if (problem) {
+    throw configError(problem, "Remove ssh.config from config/deploy.yml; the kit supplies the ssh config.")
+  }
+
   let c = dag
     .container()
     .from(KAMAL_IMAGE)
     .withDirectory("/workdir", source)
     .withWorkdir("/workdir")
     .withMountedSecret("/root/.ssh/id_ed25519", key)
+    .withNewFile("/root/.ssh/known_hosts", knownHosts)
+    .withNewFile("/root/.ssh/config", STRICT_SSH_CONFIG)
     // Kamal asks the server what is running; a cached answer would describe a past deploy.
     .withEnvVariable("SHIPKIT_NO_CACHE", Date.now().toString())
 
@@ -58,9 +83,19 @@ export async function currentVersion(
   registryPassword?: Secret,
   kamalSecrets?: Secret,
 ): Promise<string | null> {
-  const out = await kamal(source, env, key, registryPassword, kamalSecrets)
+  const ran = (await kamal(source, env, key, registryPassword, kamalSecrets))
     .withExec(["kamal", "app", "version"], { expect: "ANY" as never })
-    .stdout()
+  const out = await ran.stdout()
+
+  // Any failure here reads as "nothing deployed yet". A refused host key must not: that is
+  // the pin doing its job, and the answer is to stop, not to plan a first deploy.
+  const refused = hostKeyRefusal(`${out}\n${await ran.stderr()}`)
+  if (refused) {
+    throw infraError(
+      `Kamal refused the server's host key: ${refused}`,
+      "The server did not present the key pinned as hostKey in shipkit.yaml. See docs/runbooks/deploy.md.",
+    )
+  }
 
   // The version is the last non-empty line; everything before it is SSHKit's log.
   const line = out
@@ -81,7 +116,7 @@ export async function release(
   registryPassword?: Secret,
   kamalSecrets?: Secret,
 ): Promise<void> {
-  await kamal(source, env, key, registryPassword, kamalSecrets)
+  await (await kamal(source, env, key, registryPassword, kamalSecrets))
     // --skip-push: `ci` published this image already. Rebuilding here would produce a
     // different artifact from the one the gates were run against.
     .withExec(["kamal", "deploy", "--version", tag, "--skip-push"])
@@ -118,7 +153,7 @@ export async function rollback(
   //
   // A recovery path that has never been executed is not a recovery path. This one was broken
   // from the day it was written and looked fine.
-  await kamal(source, env, key, registryPassword, kamalSecrets)
+  await (await kamal(source, env, key, registryPassword, kamalSecrets))
     .withExec(["kamal", "rollback", toTag, "--version", toTag])
     .sync()
 }
@@ -139,7 +174,7 @@ export async function clean(
   registryPassword?: Secret,
   kamalSecrets?: Secret,
 ): Promise<string> {
-  const out = await kamal(source, env, key, registryPassword, kamalSecrets)
+  const out = await (await kamal(source, env, key, registryPassword, kamalSecrets))
     .withExec(["kamal", "prune", "all", "--version", tag])
     .stdout()
 
@@ -164,7 +199,7 @@ export async function bootDatabase(
   // --version even though an accessory has nothing to do with the app's image: without it Kamal
   // derives a version from git, and the source it is given has no .git. Every other Kamal call
   // here already passes it; this one was found missing on the first real first-deploy.
-  await kamal(source, env, key, registryPassword, kamalSecrets)
+  await (await kamal(source, env, key, registryPassword, kamalSecrets))
     .withExec(["kamal", "accessory", "boot", "db", "--version", tag])
     .sync()
 }

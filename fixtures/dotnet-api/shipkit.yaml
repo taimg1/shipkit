@@ -33,5 +33,8 @@ environments:
     host: host.docker.internal
     sshPort: 2222
     sshUser: deploy
+    # dev-server's fixed host key (dev-server/host-key/). A real server's comes from
+    # server/bootstrap.sh's output — see docs/runbooks/server-bootstrap.md.
+    hostKey: "[host.docker.internal]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINzSeby1W18fIv7pys7p0Pe4xiOEGK65dXpurYBTf5d1"
     database: app
     dbUser: postgres

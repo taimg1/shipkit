@@ -26,10 +26,12 @@ excluded_rules = [
   # EF Core 10 already generates identity columns rather than serial.
   "prefer-identity",
 
-  # These two are real protections and are excluded reluctantly: EF does not set either
-  # timeout, so they fire on every migration ever generated. The protection belongs at the
-  # connection instead — the `migrate` stage sets lock_timeout and statement_timeout when it
-  # applies the bundle (M6). Revisit this exclusion then.
+  # These two are real protections, and the protection is applied at the connection instead:
+  # EF does not set either timeout, so they fire on every migration ever generated. The
+  # `migrate` stage runs the bundle with PGOPTIONS="-c lock_timeout=… -c statement_timeout=…"
+  # (values from `migrations:` in shipkit.yaml, default 5s / 15min) and refuses a connection
+  # string with its own Options= — see .dagger/src/core/migrate-options.ts. If you apply
+  # migrations any other way, remove these two exclusions.
   "require-lock-timeout",
   "require-statement-timeout",
 ]

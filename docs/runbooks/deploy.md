@@ -34,18 +34,57 @@ The token is a hash of the plan. If anything in it changes — a new commit, ano
 merged, production moved under you — the token stops matching and the deploy refuses. Run
 `--plan` again and read what changed rather than reaching for a fresh token.
 
+The token also names the stages. A plan shown without `--stage` confirms the whole deploy and
+nothing less; to run part of it, ask for a plan of that part (`shipkit deploy --plan
+--stage=backup,migrate`) and confirm with the same `--stage`. Some sets are refused whatever
+the token says, because they skip a gate:
+
+- `release` without `verify` — nothing would check the new version, and nothing would roll it back;
+- `release` without `migrate` while migrations are pending — new code on the old schema;
+- `migrate` without `backup` while migrations are pending.
+
 ## What runs
 
 `backup` → `migrate` → `release` → `verify` → `rollback` (only if verify fails) → `clean`.
 
+Before any of them, and before anything on the server changes:
+
+1. **The deploy lock** is taken on the server (`~/.shipkit/deploy-lock-<service>` in the SSH
+   user's home). A second deploy started meanwhile is refused and told who holds the lock —
+   sha, environment, who ran it, since when. It is released when the run ends, whether it
+   succeeded, failed, or rolled back. It is separate from Kamal's own lock
+   (`~/.kamal/lock-<service>`), which Kamal still takes inside `release`, `rollback` and `clean`.
+2. **The image is pulled** onto the server with `kamal build pull` — the registry, credentials
+   and hosts `release` will use. An image that was never published (a branch, a red `ci`, a
+   wrong sha) stops the deploy here, before the backup and the migrations, rather than at
+   `release` with production already on the new schema.
+
 Everything before `release` is recoverable: a failed backup or a failed migration leaves the
-old version serving and production untouched.
+old version serving. A failed migration leaves the schema as far as it got — migrations roll
+forward, and `restore.md` covers the rest.
+
+`migrate` runs the bundle with `lock_timeout` and `statement_timeout` set (`migrations:` in
+`shipkit.yaml`, default 5s / 15min); see add-a-migration.md.
+
+## A deploy lock that was left behind
+
+The lock is released by the run that took it. If that run was killed — the terminal closed,
+the engine died — the lock stays, and every later deploy is refused with the holder's details.
+Before removing it, make sure that deploy really is gone and look at what it left: the report
+of the killed run, `kamal app version`, and the applied migrations. Then, on the server:
+
+```bash
+cat ~/.shipkit/deploy-lock-<service>/holder   # who held it and since when
+rm -rf ~/.shipkit/deploy-lock-<service>
+```
+
+Never remove Kamal's `~/.kamal/lock-<service>` this way; that one is `kamal lock release`.
 
 ## When it fails
 
 | Exit | Meaning | What to do |
 |---|---|---|
-| 1 | A gate said no | Read the stage that failed; the reason names the cause |
+| 1 | A gate said no — including an image that cannot be pulled and a deploy lock that is held | Read the stage that failed; the reason names the cause |
 | 2 | Configuration | `shipkit doctor` |
 | 3 | Infrastructure | The engine, the server, or the registry — retry after fixing |
 | 4 | Needs confirmation | Run `--plan`, read it, then `--yes=<token>` |

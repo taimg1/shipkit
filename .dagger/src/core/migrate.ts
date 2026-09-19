@@ -4,6 +4,7 @@ import { DbAdapter } from "../adapters/types.js"
 import { ShipkitError, EXIT } from "../errors.js"
 import { remoteScript, sshArgs, sshContainer } from "./ssh.js"
 import type { BackupResult } from "./backup.js"
+import { bundleRunScript } from "./migrate-options.js"
 
 /**
  * A glibc runtime with no SDK and no source — what a self-contained bundle needs and nothing
@@ -75,13 +76,18 @@ export async function migrate(
   // `ps`. Accepted rather than hidden: the alternative is writing the credential to the
   // server's disk, and anyone reading that process list already has root on the machine the
   // database runs on.
-  const runBundle =
-    `printf '%s\\n' ` +
-    `"set -e" ` +
-    `"chmod +x ${remotePath}" ` +
-    `"docker run --rm --network ${env.network} -v ${remotePath}:/efbundle:ro ` +
-    `${bundleRunner(cfg.stackVersion)} /efbundle --connection \\"$SHIPKIT_DB_URL\\"" ` +
-    `| base64 | tr -d '\\n' | ${ssh} 'base64 -d | sh'`
+  //
+  // lock_timeout and statement_timeout reach the bundle's connection through PGOPTIONS, which
+  // Npgsql reads when the connection string has no Options of its own — so one that does is
+  // refused first rather than silently winning (B5). The values are validated durations
+  // (migrate-options.ts), safe to write into the command.
+  const runBundle = bundleRunScript({
+    remotePath,
+    network: env.network,
+    image: bundleRunner(cfg.stackVersion),
+    timeouts: cfg.migrationTimeouts,
+    ssh,
+  })
 
   const runner = sshContainer(env, key)
     .withMountedFile("/bundle/efbundle", bundle)

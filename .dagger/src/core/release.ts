@@ -1,6 +1,8 @@
 import { dag, Container, Directory, Secret } from "@dagger.io/dagger"
 import { Environment } from "../config.js"
-import { infraError } from "../errors.js"
+import { EXIT, ShipkitError, infraError } from "../errors.js"
+import { remoteScript, sshContainer } from "./ssh.js"
+import { LockHolder, lockAcquireScript, lockReleaseScript, parseLockAcquire, unlockCommand } from "./deploy-lock.js"
 
 /**
  * Pinned. Kamal is the delivery layer; an unpinned delivery tool means a deploy can change
@@ -89,6 +91,32 @@ export async function release(
 }
 
 /**
+ * Pulls the release image onto the servers, the way `release` will — before anything changes.
+ *
+ * `release` passes --skip-push, so the image must already be in the registry. When it was not
+ * (a branch never published, a red CI run, a typo'd sha) that was discovered at release: after
+ * the backup and after the migrations, with production on the new schema and the old code
+ * (B4). This is Kamal's own pull — `kamal deploy --skip-push` runs exactly this step — so it
+ * asks the registry deploy.yml names, with the credentials Kamal will use, from the servers
+ * that will run it, and it validates the image's service label as release would. A registry
+ * the pipeline can reach but the server cannot is not "available".
+ *
+ * It takes no Kamal lock (`build pull` does not), so it cannot collide with Kamal's.
+ */
+export async function pullImage(
+  source: Directory,
+  env: Environment,
+  key: Secret,
+  tag: string,
+  registryPassword?: Secret,
+  kamalSecrets?: Secret,
+): Promise<void> {
+  await kamal(source, env, key, registryPassword, kamalSecrets)
+    .withExec(["kamal", "build", "pull", "--version", tag])
+    .sync()
+}
+
+/**
  * Puts the previous image back.
  *
  * The database is NOT rolled back. Application rollback and database rollback are separate
@@ -167,4 +195,45 @@ export async function bootDatabase(
   await kamal(source, env, key, registryPassword, kamalSecrets)
     .withExec(["kamal", "accessory", "boot", "db", "--version", tag])
     .sync()
+}
+
+/** Takes the server-side deploy lock (deploy-lock.ts) or refuses. Never waits. */
+export async function acquireDeployLock(env: Environment, key: Secret, service: string, holder: LockHolder) {
+  const out = await sshContainer(env, key)
+    .withExec(["sh", "-c", remoteScript(env, lockAcquireScript(service, holder))])
+    .stdout()
+  const got = parseLockAcquire(out)
+  if (got.ok) return
+  if (got.held) {
+    throw new ShipkitError(
+      EXIT.GATE,
+      `another deploy holds the lock on ${env.host}: ${got.holder}`,
+      "Wait for it to finish. If no deploy is running (it was killed mid-run), check the server " +
+        `is in the state you expect, then remove the lock on the server: ${unlockCommand(service)} ` +
+        "(docs/runbooks/deploy.md).",
+    )
+  }
+  throw new ShipkitError(EXIT.INFRA, `could not take the deploy lock on ${env.host}: ${got.reason}`)
+}
+
+/**
+ * Releases the lock if it is still ours. Never throws: it runs after the outcome is decided,
+ * and a failure here must not replace the reason the deploy failed. What happened is returned
+ * for the report — a lock left behind makes the next deploy refuse, with the unlock command.
+ */
+export async function releaseDeployLock(env: Environment, key: Secret, service: string, id: string) {
+  try {
+    const out = await sshContainer(env, key)
+      .withExec(["sh", "-c", remoteScript(env, lockReleaseScript(service, id))])
+      .stdout()
+    const answer = out.trim()
+    if (answer === "RELEASED") return { released: true }
+    return { released: false, reason: answer || "no answer", unlock: unlockCommand(service) }
+  } catch (err) {
+    return {
+      released: false,
+      reason: err instanceof Error ? err.message.slice(0, 200) : String(err),
+      unlock: unlockCommand(service),
+    }
+  }
 }

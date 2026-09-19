@@ -137,6 +137,23 @@ test("a bare --yes is a missing confirmation, exit 4", () => {
   assert.equal(argsFor(["deploy", "--yes"]).invalid?.code, 4)
 })
 
+test("deploy --plan is built for the same --stage the deploy will run (B7)", () => {
+  const plan = argsFor(["deploy", "--plan", "--stage=backup,migrate"]).args
+  assert.equal(plan[0], "deploy-plan")
+  assert.ok(plan.includes("--stage=backup,migrate"))
+  const run = argsFor(["deploy", "--yes=abc", "--stage=backup,migrate"]).args
+  assert.ok(run.includes("--stage=backup,migrate"))
+  assert.ok(!argsFor(["deploy", "--plan"]).args.some((a: string) => a.startsWith("--stage")))
+})
+
+test("deploy names who is running it, for the deploy lock (B13)", () => {
+  const args = argsFor(["deploy", "--yes=abc"], ctx({ env: { USER: "alice" } })).args
+  assert.ok(args.includes("--actor=alice"))
+  const ci = argsFor(["deploy", "--yes=abc"], ctx({ env: { USER: "runner", GITHUB_ACTOR: "bob" } })).args
+  assert.ok(ci.includes("--actor=bob"))
+  assert.ok(!argsFor(["deploy", "--yes=abc"]).args.some((a: string) => a.startsWith("--actor")))
+})
+
 test("a flag never swallows the command after it", () => {
   const opts = parseArgs(["--json", "ci"])
   assert.equal(opts.json, true)

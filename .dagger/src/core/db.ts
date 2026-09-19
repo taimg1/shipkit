@@ -43,12 +43,12 @@ const SQUAWK_VERSION = "2.65.0"
 /**
  * Gate 1 — lint the pending migration SQL.
  *
- * UNVERIFIED: Squawk's JSON reporter flag and output shape have not been observed yet.
- * The M3 checkpoint in docs/v1-plan.md exists to confirm this, and to confirm that Squawk
- * does NOT see statements wrapped in DO $$ blocks (the false-green risk, §7.2).
+ * The JSON reporter flag, its output shape and the exit codes were observed on squawk-cli
+ * 2.65.0 (see parseSquawk). Still UNVERIFIED: that Squawk does NOT see statements wrapped in
+ * DO $$ blocks (the false-green risk, §7.2) — the M3 checkpoint in docs/v1-plan.md.
  */
 export async function lintSql(sql: File, src: Directory): Promise<Finding[]> {
-  const raw = await dag
+  const run = dag
     .container()
     .from(SQUAWK_BASE)
     .withExec(["npm", "install", "-g", `squawk-cli@${SQUAWK_VERSION}`])
@@ -56,11 +56,12 @@ export async function lintSql(sql: File, src: Directory): Promise<Finding[]> {
     .withMountedFile("/work/.squawk.toml", await squawkConfig(src))
     .withExec(
       ["squawk", "--config", "/work/.squawk.toml", "--reporter", "json", "/work/migration.sql"],
-      { expect: ReturnType.Any }, // a non-zero exit is the finding, not an error
+      // A non-zero exit may be the finding, not an error — but it may also be Squawk failing
+      // to run at all. The code and stderr are read so parseSquawk can tell the two apart.
+      { expect: ReturnType.Any },
     )
-    .stdout()
 
-  return parseSquawk(raw)
+  return parseSquawk(await run.stdout(), await run.exitCode(), await run.stderr())
 }
 
 /**

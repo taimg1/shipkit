@@ -33,6 +33,13 @@ publish: true
 # a failed deploy that looks green.
 health: /health
 
+# Set on the connection the migration bundle opens (PGOPTIONS). They are why Squawk's
+# require-lock-timeout / require-statement-timeout rules can stay excluded. A PostgreSQL
+# duration with a unit; 0 (no timeout) is refused. These are the defaults.
+migrations:
+  lockTimeout: 5s
+  statementTimeout: 15min
+
 environments:
   prod:
     url: https://api.client.com

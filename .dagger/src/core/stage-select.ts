@@ -45,3 +45,38 @@ export function parseStages(spec: string | undefined, known: string[]): StageSel
 export function stageRuns(selection: StageSelection, name: string): boolean {
   return selection.selected === null || selection.selected.has(name)
 }
+
+/**
+ * The stages a selection runs, in pipeline order — or null when that is every stage.
+ *
+ * This is what a plan token confirms (B7). `--stage=` naming every stage is the same run as no
+ * `--stage` at all, so both yield null and both match the same token.
+ */
+export function selectedStages(selection: StageSelection, known: string[]): string[] | null {
+  if (selection.selected === null) return null
+  const list = known.filter((n) => selection.selected!.has(n))
+  return list.length === known.length ? null : list
+}
+
+/**
+ * Why a deploy stage set is unsafe to run, or null when it is not.
+ *
+ * A valid token used to authorise any subset of the plan: `--stage=release` shipped new code
+ * onto the old schema with the migrations still pending, and `--stage=release,clean` released
+ * with no verify, so no health gate and no automatic rollback (B7). The token now names the
+ * stages too, and these combinations are refused whatever the token says — a plan cannot
+ * confirm skipping a gate.
+ */
+export function deployStageProblem(selection: StageSelection, pendingMigrations: number): string | null {
+  const runs = (name: string) => stageRuns(selection, name)
+  if (runs("release") && !runs("verify")) {
+    return "release without verify: nothing would check the new version answers, and nothing would roll it back"
+  }
+  if (runs("release") && !runs("migrate") && pendingMigrations > 0) {
+    return `release without migrate while ${pendingMigrations} migration(s) are pending: the new code would run on the old schema`
+  }
+  if (runs("migrate") && !runs("backup") && pendingMigrations > 0) {
+    return "migrate without backup: no migration runs without a verified backup taken in the same deploy"
+  }
+  return null
+}

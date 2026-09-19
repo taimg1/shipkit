@@ -1,6 +1,7 @@
 import { Directory } from "@dagger.io/dagger"
 import { parse } from "yaml"
 import { configError } from "./errors.js"
+import { DEFAULT_MIGRATION_TIMEOUTS, MigrationTimeouts, pgDuration } from "./core/migrate-options.js"
 
 export type StackName = "dotnet" | "nest" | "next" | "custom"
 export type DbKind = "postgres" | "none"
@@ -53,6 +54,11 @@ export interface Config {
   targetArch: string
   /** Deploy targets by name; `prod` must exist for `deploy`. */
   environments: Record<string, Environment>
+  /**
+   * lock_timeout and statement_timeout for the connection the migration bundle opens
+   * (`migrations:` in shipkit.yaml). They are why Squawk's two timeout rules can stay excluded.
+   */
+  migrationTimeouts: MigrationTimeouts
 }
 
 export interface Environment {
@@ -150,6 +156,20 @@ export async function loadConfig(source: Directory): Promise<Config> {
     }
   }
 
+  const rawMigrations = (c.migrations ?? {}) as Record<string, unknown>
+  const migrationTimeouts = { ...DEFAULT_MIGRATION_TIMEOUTS }
+  for (const key of ["lockTimeout", "statementTimeout"] as const) {
+    if (rawMigrations[key] === undefined) continue
+    const value = pgDuration(rawMigrations[key])
+    if (value === null) {
+      throw configError(
+        `migrations.${key} must be a PostgreSQL duration with a unit, e.g. "5s" or "15min"`,
+        "A bare number is milliseconds to PostgreSQL, and 0 switches the timeout off.",
+      )
+    }
+    migrationTimeouts[key] = value
+  }
+
   return {
     kit: c.kit as string | undefined,
     stack: stack as StackName,
@@ -166,6 +186,7 @@ export async function loadConfig(source: Directory): Promise<Config> {
     defaultBranch: (c.defaultBranch as string) ?? "main",
     publish: c.publish === undefined ? true : c.publish === true,
     environments,
+    migrationTimeouts,
   }
 }
 

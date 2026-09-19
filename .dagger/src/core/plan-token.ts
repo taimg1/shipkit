@@ -34,6 +34,12 @@ export interface DeployPlan {
   sqlPreview: string
   destructive: boolean
   lastVerifiedBackup: string | null
+  /**
+   * The deploy stages this plan was shown for, in order; null (or absent) means all of them.
+   * Part of the token: a plan confirmed for the whole deploy does not authorise running only
+   * part of it (B7).
+   */
+  stages?: string[] | null
   /** Hash of everything above. `--yes` must present this exact token. */
   token: string
 }
@@ -55,6 +61,7 @@ export function planToken(p: Omit<DeployPlan, "token">): string {
     provision: p.provision,
     migrations: p.migrations,
     sqlDigest: p.sqlDigest,
+    stages: p.stages ?? "all",
   })
   return createHash("sha256").update(canonical).digest("hex").slice(0, 12)
 }
@@ -75,8 +82,9 @@ export function renderPlan(p: DeployPlan): string {
     `  migrations  ${p.migrations.length > 0 ? p.migrations.join("\n              ") : "none"}`,
     `  sql         ${p.sqlPreview}`,
     `  backup      will run first; last verified ${p.lastVerifiedBackup ?? "never"}`,
+    ...(p.stages ? [`  stages      ${p.stages.join(", ")} only`] : []),
     "",
-    `  to execute: shipkit deploy --yes=${p.token}`,
+    `  to execute: shipkit deploy --yes=${p.token}${p.stages ? ` --stage=${p.stages.join(",")}` : ""}`,
   ]
   return lines.join("\n")
 }

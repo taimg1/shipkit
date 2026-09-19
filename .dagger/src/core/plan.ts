@@ -44,6 +44,8 @@ export async function buildPlan(
   key: Secret,
   healthPath: string,
   registryPassword?: Secret,
+  /** The stages the deploy will run (selectedStages); null for all. Part of the token (B7). */
+  stages: string[] | null = null,
 ): Promise<DeployPlan> {
   const imageTag = `sha-${sha.slice(0, 7)}`
   const needsDb = cfg.db !== "none" && !!adapter.db
@@ -104,6 +106,7 @@ export async function buildPlan(
         : `${sqlText.split("\n").filter((l) => l.trim().length > 0).length} lines`,
     destructive: /\b(DROP\s+(COLUMN|TABLE)|ALTER\s+COLUMN)\b/i.test(sqlText),
     lastVerifiedBackup: null,
+    stages,
   }
 
   return { ...base, token: planToken(base) }

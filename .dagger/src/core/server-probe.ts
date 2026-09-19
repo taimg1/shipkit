@@ -53,6 +53,8 @@ export interface ServerState {
  * the caller from configuration and are shell-quoted here.
  */
 export function serverProbeScript(service: string, dbContainer: string | undefined): string {
+  // The same rule as shq() in ssh-command.ts. Kept local, as in versionProbeScript: the tests
+  // import this file directly, and it can only do that while it imports nothing.
   const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
   return [
     "if ! docker info >/dev/null 2>&1; then echo docker:unavailable; exit 0; fi",

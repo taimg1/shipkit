@@ -4,3 +4,13 @@
 **/.idea
 **/node_modules
 .git
+
+# Secrets and delivery configuration never enter the build context. `COPY . .` would carry
+# them into the build stage and its cache, and a project that publishes a directory it did not
+# mean to would carry them into the image.
+.kamal/
+config/deploy*.yml
+.env
+.env.*
+*.pem
+*.key

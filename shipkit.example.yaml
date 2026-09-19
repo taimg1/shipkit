@@ -36,3 +36,11 @@ health: /health
 environments:
   prod:
     url: https://api.client.com
+    # Once the server exists. These values are used in shell commands, so each one is checked
+    # for shape when shipkit.yaml is loaded: a hostname or IP, a login name, a port from 1 to
+    # 65535, plain Docker/PostgreSQL names. Anything else is a config error, not a guess.
+    # host: api.client.com
+    # sshUser: deploy
+    # sshPort: 22
+    # database: app
+    # dbUser: postgres

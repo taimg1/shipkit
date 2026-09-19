@@ -31,4 +31,4 @@ export function sshContainer(env: Environment, key: Secret): Container {
     .withEnvVariable("SHIPKIT_NO_CACHE", Date.now().toString())
 }
 
-export { remoteScript, sshArgs } from "./ssh-command.js"
+export { remoteScript, shq, sshArgs } from "./ssh-command.js"

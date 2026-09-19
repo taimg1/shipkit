@@ -2,7 +2,7 @@ import { dag, File, Secret } from "@dagger.io/dagger"
 import { Environment } from "../config.js"
 import { backupUnverified } from "./gates.js"
 import { PG_IMAGE, PG_PASSWORD, PG_USER, postgresService } from "./postgres.js"
-import { remoteScript, sshContainer } from "./ssh.js"
+import { remoteScript, shq, sshContainer } from "./ssh.js"
 
 /**
  * Gate 2 evidence. A backup is what was proven restorable, not what was written.
@@ -69,7 +69,7 @@ export async function backup(
   const dumped = base.withExec([
     "sh",
     "-c",
-    `${remoteScript(env, `docker exec ${env.dbContainer} pg_dump -Fc -U ${env.dbUser} ${env.database}`)} > ${outPath}`,
+    `${remoteScript(env, `docker exec ${shq(env.dbContainer)} pg_dump -Fc -U ${shq(env.dbUser)} ${shq(env.database)}`)} > ${shq(outPath)}`,
   ])
 
   const dump = dumped.file(outPath)
@@ -80,11 +80,15 @@ export async function backup(
 
   // Both the count and what pg_restore actually said: a gate that reports only "could not
   // read it" costs a round trip every time it fires, and this one fires on real problems.
+  // Whether the file starts like an archive is said in words, never shown: the message ends up
+  // in the run report, and the dump's bytes are production data.
   const listing = await dumped
     .withExec([
       "sh",
       "-c",
-      `pg_restore --list ${outPath} 2>&1 | head -40; echo "---"; head -c 200 ${outPath} | od -c | head -5`,
+      `pg_restore --list ${shq(outPath)} 2>&1 | head -40; echo "---"; ` +
+        `if [ "$(head -c 5 ${shq(outPath)})" = PGDMP ]; then echo "starts with the custom-format signature"; ` +
+        `else echo "does not start with the custom-format signature"; fi`,
     ])
     .stdout()
 
@@ -142,7 +146,7 @@ async function productionTableCount(env: Environment, key: Secret): Promise<numb
   // stdin and a quoted heredoc, for the same reason as in history.ts: nothing in the query
   // then has to survive a shell.
   const script =
-    `docker exec -i ${env.dbContainer} psql -U ${env.dbUser} -d ${env.database} -tA ` +
+    `docker exec -i ${shq(env.dbContainer ?? "")} psql -U ${shq(env.dbUser)} -d ${shq(env.database)} -tA ` +
     `<<'SHIPKIT_SQL'\n${query}\nSHIPKIT_SQL\n`
 
   const out = await sshContainer(env, key)

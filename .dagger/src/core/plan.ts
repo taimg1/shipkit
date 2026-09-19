@@ -13,6 +13,7 @@ import { EXIT, ShipkitError } from "../errors.js"
 import { ServerState, parseServerProbe, provisioning, serverProbeScript } from "./server-probe.js"
 import { dockerPlatform, SUPPORTED_RIDS } from "./platform.js"
 import { remoteScript, sshContainer } from "./ssh.js"
+import { imageTag as tagFor } from "./publish-gate.js"
 
 /** Asks the server what exists on it. An answer the kit cannot read stops the plan. */
 export async function probeServer(cfg: Config, env: Environment, key: Secret): Promise<ServerState> {
@@ -45,7 +46,7 @@ export async function buildPlan(
   healthPath: string,
   registryPassword?: Secret,
 ): Promise<DeployPlan> {
-  const imageTag = `sha-${sha.slice(0, 7)}`
+  const imageTag = tagFor(sha)
   const needsDb = cfg.db !== "none" && !!adapter.db
 
   // The server first: everything below reads it, and each read used to turn "could not ask"

@@ -4,7 +4,8 @@
 # upgrades, and the deploy user logs in with a key that lives in this repository's working tree. Its
 # only job is to be something Kamal can deploy to over SSH so the deploy pipeline can be
 # built and broken on purpose without paying for a VPS.
-FROM docker:28-dind
+# docker:28-dind, pinned by digest.
+FROM docker:28-dind@sha256:2a232a42256f70d78e3cc5d2b5d6b3276710a0de0596c145f627ecfae90282ac
 
 RUN apk add --no-cache openssh bash curl postgresql17-client
 

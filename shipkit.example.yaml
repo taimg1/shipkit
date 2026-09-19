@@ -2,7 +2,11 @@
 # Missing file = the build fails with a message. There is no default — defaults hide
 # misconfiguration.
 
-kit: github.com/taimg1/shipkit@v1.0.0
+# The kit version: a full 40-character commit of github.com/taimg1/shipkit, never a tag or a
+# branch — those can be moved, and this line decides which code runs your pipeline and holds
+# your deploy key. templates/github/ci.yml refuses anything else. `git ls-remote
+# https://github.com/taimg1/shipkit <tag>` gives the commit a tag points to today.
+kit: github.com/taimg1/shipkit@REPLACE_WITH_40_CHAR_COMMIT
 
 # Must match `service:` in config/deploy.yml. Kamal refuses an image whose `service` label
 # does not match, and it only labels images it built itself — so the kit labels ours.
@@ -26,6 +30,8 @@ registry: ghcr.io/taimg1/client-api
 defaultBranch: main
 
 # Set to false for a project that never publishes an image (a fixture, a library).
+# true needs `packages: write` and SHIPKIT_REGISTRY_TOKEN in the ci workflow — both are in
+# templates/github/ci.yml; with false, delete them there.
 publish: true
 
 # /health must return {"status":"ok","version":"<sha>"}.

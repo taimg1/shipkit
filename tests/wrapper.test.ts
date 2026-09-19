@@ -8,6 +8,7 @@ import {
   parseArgs,
   parseDefaultBranch,
   parseKitRef,
+  publishBranch,
   rawCallArgs,
   resolveModule,
   translate,
@@ -261,4 +262,75 @@ test("comments, blank lines and literal values are left alone", () => {
 
 test("${BRACED} references resolve too", () => {
   assert.equal(expandSecretsFile("A=${A}\n", { A: "v" }).content, "A=v\n")
+})
+
+// --- which branch ci names for the publish decision (C10) ---
+
+const GH = { GITHUB_ACTIONS: "true" }
+const gitSays = (name: string | undefined) => () => name
+
+test("on GitHub a push names the branch it pushed to", () => {
+  const env = { ...GH, GITHUB_EVENT_NAME: "push", GITHUB_REF: "refs/heads/main", GITHUB_REF_NAME: "main" }
+  assert.equal(publishBranch(env, undefined, gitSays("whatever")), "main")
+})
+
+// The bug: GITHUB_HEAD_REF is the pull request author's branch name. A fork's branch called
+// `main` was reported as `main` and passed the module's publish check.
+test("a pull request from a branch called main is never reported as main", () => {
+  const env = {
+    ...GH,
+    GITHUB_EVENT_NAME: "pull_request",
+    GITHUB_REF: "refs/pull/7/merge",
+    GITHUB_HEAD_REF: "main",
+  }
+  const branch = publishBranch(env, undefined, gitSays("main"))
+  assert.equal(branch, "pull_request:refs/pull/7/merge")
+  assert.notEqual(branch, "main")
+})
+
+test("on a pull request an explicit --branch cannot claim the default branch either", () => {
+  const env = { ...GH, GITHUB_EVENT_NAME: "pull_request", GITHUB_REF: "refs/pull/7/merge" }
+  assert.equal(publishBranch(env, "main", gitSays("main")), "pull_request:refs/pull/7/merge")
+})
+
+test("events other than push never name a branch, even on the default one", () => {
+  for (const event of ["workflow_dispatch", "schedule", "pull_request_target"]) {
+    const env = { ...GH, GITHUB_EVENT_NAME: event, GITHUB_REF: "refs/heads/main" }
+    assert.equal(publishBranch(env, undefined, gitSays("main")), `${event}:refs/heads/main`)
+  }
+})
+
+test("a tag push is not a branch", () => {
+  const env = { ...GH, GITHUB_EVENT_NAME: "push", GITHUB_REF: "refs/tags/v1.0.0" }
+  assert.equal(publishBranch(env, undefined, gitSays("main")), "push:refs/tags/v1.0.0")
+})
+
+test("on GitHub with no event at all, nothing looks like a branch", () => {
+  assert.equal(publishBranch(GH, undefined, gitSays("main")), "unknown-event:unknown-ref")
+})
+
+test("outside GitHub: --branch, else git, else unknown", () => {
+  assert.equal(publishBranch({}, "release", gitSays("main")), "release")
+  assert.equal(publishBranch({}, undefined, gitSays("main")), "main")
+  assert.equal(publishBranch({}, undefined, gitSays(undefined)), undefined)
+})
+
+test("GITHUB_HEAD_REF outside a GitHub run is ignored too", () => {
+  assert.equal(publishBranch({ GITHUB_HEAD_REF: "main" }, undefined, gitSays("feature")), "feature")
+})
+
+test("ci passes the event-derived branch to the module on a pull request", () => {
+  const env = { ...GH, GITHUB_EVENT_NAME: "pull_request", GITHUB_REF: "refs/pull/7/merge", GITHUB_HEAD_REF: "main" }
+  const { args } = argsFor(["ci"], ctx({ env, branch: () => "main" }))
+  assert.ok(args.includes("--branch=pull_request:refs/pull/7/merge"), args.join(" "))
+  assert.ok(!args.includes("--branch=main"))
+})
+
+test("ci passes no --branch when none is known, so the module refuses to publish", () => {
+  const { args } = argsFor(["ci"], ctx({ branch: () => undefined }))
+  assert.ok(!args.some((a: string) => a.startsWith("--branch")), args.join(" "))
+})
+
+test("summary takes --jobs", () => {
+  assert.equal(argsFor(["summary", "reports", "--jobs", "needs.json"]).invalid, undefined)
 })

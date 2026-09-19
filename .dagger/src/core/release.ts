@@ -1,14 +1,9 @@
 import { dag, Container, Directory, Secret } from "@dagger.io/dagger"
 import { Environment } from "../config.js"
 import { configError, infraError } from "../errors.js"
+import { KAMAL_IMAGE } from "./images.js"
 import { hostKeyRefusal, kamalHostKeyProblem } from "./kamal-config.js"
 import { STRICT_SSH_CONFIG, hostKeyHint, knownHostsFor } from "./known-hosts.js"
-
-/**
- * Pinned. Kamal is the delivery layer; an unpinned delivery tool means a deploy can change
- * behaviour without anything in the repository changing.
- */
-const KAMAL_IMAGE = "ghcr.io/basecamp/kamal:v2.12.0"
 
 /**
  * Kamal, with the project mounted and an SSH key it can use.

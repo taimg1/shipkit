@@ -46,7 +46,8 @@ env:
 
 accessories:
   db:
-    image: postgres:17-alpine
+    # postgres:17-alpine, pinned by digest: the same image the kit restores backups into.
+    image: postgres:17-alpine@sha256:f02121de6f74d30d8a94cd1d9584125e2178d7e6c377d8130112d4e52d867995
     host: host.docker.internal
     env:
       clear:

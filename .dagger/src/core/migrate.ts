@@ -10,6 +10,7 @@ import {
   removeBundleDirScript,
   runBundleCommand,
 } from "./ssh-command.js"
+import { RUNTIME_DEPS_VERSIONS, runtimeDepsImage } from "./images.js"
 import type { BackupResult } from "./backup.js"
 
 /**
@@ -18,7 +19,17 @@ import type { BackupResult } from "./backup.js"
  * irrelevant: an Alpine server cannot run a glibc-linked bundle directly, and discovering
  * that during a deploy is expensive.
  */
-const bundleRunner = (version: string) => `mcr.microsoft.com/dotnet/runtime-deps:${version}`
+const bundleRunner = (version: string) => {
+  const image = runtimeDepsImage(version)
+  if (!image) {
+    throw new ShipkitError(
+      EXIT.CONFIG,
+      `no pinned migration runner for stackVersion "${version}"`,
+      `The kit pins runtime-deps by digest for: ${RUNTIME_DEPS_VERSIONS.join(", ")}. Add the new one to core/images.ts.`,
+    )
+  }
+  return image
+}
 
 export interface MigrateResult {
   applied: string[]

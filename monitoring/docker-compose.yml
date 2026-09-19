@@ -11,7 +11,8 @@ name: shipkit-monitoring
 
 services:
   uptime-kuma:
-    image: louislam/uptime-kuma:1
+    # uptime-kuma:1, pinned by digest. To move it: docker buildx imagetools inspect louislam/uptime-kuma:1
+    image: louislam/uptime-kuma:1@sha256:70233f4acb5163fd2a59a49909cf01e44415cecff13dba69e3a86647a2919f83
     restart: unless-stopped
     ports:
       - "3001:3001"

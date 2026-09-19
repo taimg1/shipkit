@@ -3,13 +3,19 @@
 # Extracted because ci.yml runs one job per stage now, and the Dagger version was about to be
 # pinned in five places. Setup only: nothing here decides what runs or whether it passed.
 name: shipkit setup
-description: Node, QEMU and Dagger, pinned.
+description: Node, QEMU and Dagger, pinned by commit and checksum.
 
 inputs:
   dagger-version:
     description: The Dagger version the module is built against.
     required: false
     default: v0.21.9
+  dagger-sha256:
+    description: >-
+      sha256 of dagger_<version>_linux_amd64.tar.gz, from that release's checksums.txt.
+      Changes together with dagger-version, never on its own.
+    required: false
+    default: 33eea0b08d6be444bada18e64b2216459100d6070abcb4b5345cee40c9fff982
 
 runs:
   using: composite
@@ -19,14 +25,27 @@ runs:
     # is meant to run on rather than for whatever built it — and these runners are x86. Without
     # binfmt handlers the .NET SDK crashes inside the emulated build with NuGet errors that say
     # nothing about architecture.
-    - uses: docker/setup-qemu-action@v3
+    - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
 
-    - uses: actions/setup-node@v4
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
       with:
         node-version: 22
 
+    # The release archive, checked against a checksum written here, then installed. Not
+    # `install.sh | sh`: that ran whatever the download host served, and the checksum it checks
+    # comes from the same host, so it proves the download was not truncated and nothing else.
+    # The sum below was taken from checksums.txt of the release on both dl.dagger.io and GitHub.
     - name: Install Dagger
       shell: bash
+      env:
+        DAGGER_VERSION: ${{ inputs.dagger-version }}
+        DAGGER_SHA256: ${{ inputs.dagger-sha256 }}
       run: |
-        curl -fsSL https://dl.dagger.io/dagger/install.sh \
-          | DAGGER_VERSION=${{ inputs.dagger-version }} BIN_DIR=/usr/local/bin sh
+        set -euo pipefail
+        test "$(uname -sm)" = "Linux x86_64" || { echo "the pinned Dagger checksum is for linux/amd64, this runner is $(uname -sm)"; exit 1; }
+        archive="dagger_${DAGGER_VERSION}_linux_amd64.tar.gz"
+        curl -fsSL -o "$RUNNER_TEMP/$archive" "https://dl.dagger.io/dagger/releases/${DAGGER_VERSION#v}/$archive"
+        echo "$DAGGER_SHA256  $RUNNER_TEMP/$archive" | sha256sum -c -
+        tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" dagger
+        install -m 0755 "$RUNNER_TEMP/dagger" /usr/local/bin/dagger
+        dagger version

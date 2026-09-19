@@ -2,6 +2,7 @@ import { dag, Container, Secret } from "@dagger.io/dagger"
 import { Environment } from "../config.js"
 import { remoteScript, sshArgs } from "./ssh-command.js"
 import { configError } from "../errors.js"
+import { ALPINE_IMAGE } from "./images.js"
 import { hostKeyHint, knownHostsFor } from "./known-hosts.js"
 
 /**
@@ -30,7 +31,7 @@ export function sshContainer(env: Environment, key: Secret): Container {
 
   return dag
     .container()
-    .from("alpine:3.21")
+    .from(ALPINE_IMAGE)
     .withExec(["apk", "add", "--no-cache", "openssh-client", "postgresql17-client"])
     .withMountedSecret("/root/.ssh/id_ed25519", key)
     .withNewFile("/root/.ssh/known_hosts", knownHosts)

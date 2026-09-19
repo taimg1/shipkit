@@ -12,7 +12,7 @@ shipkit deploy --yes=<token>   # runs exactly that plan
 
 ```
   target      prod  (https://api.client.com)
-  image       sha-a1b2c3d  <-  currently sha-9f8e7d6
+  image       sha-a1b2c3d4…  <-  currently sha-9f8e7d6…   (tags carry the full commit)
   migrations  20260911_AddOrdersIndex
   sql         12 lines
   backup      will run first; last verified 2026-09-10 03:00

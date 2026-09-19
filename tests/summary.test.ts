@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { CI_STAGE_ORDER, mergeStages, renderSummary } from "../bin/summary.mjs"
+import { CI_STAGE_ORDER, mergeStages, parseJobResults, renderSummary, unsuccessfulJobs } from "../bin/summary.mjs"
 
 /** What one job's report looks like: its own stage ran, the rest are placeholders. */
 const jobReport = (name: string, stage: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
@@ -86,4 +86,56 @@ test("a dirty tree is called out, because its image is never published", () => {
 
 test("the title names the pipeline, so deploy and ci summaries are told apart", () => {
   assert.match(renderSummary([jobReport("pre", {})], { title: "Deploy" }), /^## Deploy — ok/)
+})
+
+// --- job results (D-10) ---
+
+const needs = (results: Record<string, string>) =>
+  Object.fromEntries(Object.entries(results).map(([name, result]) => [name, { result, outputs: {} }]))
+
+// The bug: `unit` writes no report. With only unit tests failing, every report said ok and the
+// summary of a red workflow was headed "CI — ok".
+test("a job that failed without a report fails the verdict", () => {
+  const jobs = needs({ unit: "failure", analysis: "success", tests: "success", migrations: "success", image: "skipped" })
+  const out = renderSummary([jobReport("pre", {}), jobReport("test", {})], { jobs })
+  assert.match(out, /^## CI — failed/)
+  assert.match(out, /`unit` \(failure\)/)
+})
+
+test("a cancelled job is not a pass either", () => {
+  const out = renderSummary([jobReport("pre", {})], { jobs: needs({ unit: "success", tests: "cancelled" }) })
+  assert.match(out, /^## CI — failed/)
+  assert.match(out, /`tests` \(cancelled\)/)
+})
+
+test("all jobs succeeded and all reports ok is ok", () => {
+  const out = renderSummary([jobReport("pre", {})], { jobs: needs({ unit: "success", analysis: "success" }) })
+  assert.match(out, /^## CI — ok/)
+  assert.doesNotMatch(out, /did not succeed/)
+})
+
+test("a skipped job on its own does not fail the verdict", () => {
+  assert.deepEqual(unsuccessfulJobs(needs({ image: "skipped", unit: "success" })), [])
+})
+
+test("no reports and a failed job says failed, and which job", () => {
+  const out = renderSummary([], { jobs: needs({ unit: "failure" }) })
+  assert.match(out, /^## CI — failed/)
+  assert.match(out, /`unit` \(failure\)/)
+})
+
+// Asked for and unreadable is not the same as not asked for.
+test("job results that cannot be read fail the verdict", () => {
+  assert.equal(parseJobResults("not json"), null)
+  assert.equal(parseJobResults("[]"), null)
+  assert.match(renderSummary([jobReport("pre", {})], { jobs: null }), /^## CI — failed/)
+})
+
+test("job results read from GitHub's toJSON(needs)", () => {
+  const text = JSON.stringify(needs({ unit: "failure", tests: "success" }), null, 2)
+  assert.deepEqual(unsuccessfulJobs(parseJobResults(text)), [{ name: "unit", result: "failure" }])
+})
+
+test("without job results the verdict is what the reports say, as before", () => {
+  assert.match(renderSummary([jobReport("pre", {})]), /^## CI — ok/)
 })

@@ -6,6 +6,7 @@ import type { Loss } from "./schema-snapshot.js"
 import { ShipkitError } from "../errors.js"
 import { dataLoss, destructiveSql, emptyScript, squawkFailed, staleAllowance } from "./gates.js"
 import { PG_IMAGE, PG_PASSWORD, PG_USER, dsnFor, postgresService } from "./postgres.js"
+import { SQUAWK_BASE_IMAGE } from "./images.js"
 import {
   SNAPSHOT_SQL,
   findLosses,
@@ -37,7 +38,7 @@ const SEED_NAME = "seed.sql"
  * The version is pinned. Squawk's rule set changes between releases, and a linter that
  * silently gains or loses a rule changes what the gate means.
  */
-const SQUAWK_BASE = "node:22-slim"
+const SQUAWK_BASE = SQUAWK_BASE_IMAGE
 const SQUAWK_VERSION = "2.65.0"
 
 /**

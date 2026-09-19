@@ -207,6 +207,7 @@ export function isDirty(porcelain) {
  */
 export function expandSecretsFile(text, env) {
   const missing = []
+  const unquotable = []
   const lines = []
 
   for (const raw of text.split("\n")) {
@@ -237,10 +238,22 @@ export function expandSecretsFile(text, env) {
       missing.push(reference[1])
       continue
     }
-    lines.push(`${name}=${resolved}`)
+    // Written single-quoted. Kamal parses this file with dotenv plus its inline command
+    // substitution, so an unquoted `$x` in a value is expanded and `$(...)` is RUN — a password
+    // with a `$` in it silently became another password, and one with `$(...)` a command.
+    // Inside single quotes dotenv takes everything literally, with no escape for a quote or a
+    // line break: a value holding either is refused rather than written in a form Kamal reads
+    // differently. Found on dev-server.
+    if (/['\r\n]/.test(resolved)) {
+      unquotable.push(reference[1])
+      continue
+    }
+    lines.push(`${name}='${resolved}'`)
   }
 
-  return missing.length > 0 ? { missing } : { content: lines.join("\n").replace(/\n+$/, "") + "\n" }
+  if (missing.length > 0) return { missing }
+  if (unquotable.length > 0) return { unquotable }
+  return { content: lines.join("\n").replace(/\n+$/, "") + "\n" }
 }
 
 /**

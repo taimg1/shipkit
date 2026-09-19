@@ -382,6 +382,13 @@ async function main() {
             "  export them where the deploy runs; an empty secret deploys and misbehaves in production",
         )
       }
+      if (resolved.unquotable) {
+        fail(
+          EXIT.CONFIG,
+          `.kamal/secrets: these values contain a single quote or a line break: ${resolved.unquotable.join(", ")}\n` +
+            "  Kamal's secrets file cannot carry either literally; change the value (a generated password need not use them)",
+        )
+      }
       process.env.SHIPKIT_KAMAL_SECRETS = resolved.content
     }
   }

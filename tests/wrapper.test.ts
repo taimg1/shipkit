@@ -243,7 +243,7 @@ test("resolves the references in .kamal/secrets from the environment", () => {
     ConnectionStrings__Default: "Host=db;Password=s3cret",
   })
   assert.equal(r.missing, undefined)
-  assert.equal(r.content, "POSTGRES_PASSWORD=s3cret\nConnectionStrings__Default=Host=db;Password=s3cret\n")
+  assert.equal(r.content, "POSTGRES_PASSWORD='s3cret'\nConnectionStrings__Default='Host=db;Password=s3cret'\n")
 })
 
 // The failure this exists to prevent: an empty value is not a value.
@@ -274,11 +274,11 @@ test("comments, blank lines and literal values are left alone", () => {
   const r = expandSecretsFile(file, { REF: "resolved" })
   assert.match(r.content, /^# a note$/m)
   assert.match(r.content, /^LITERAL=kept-as-is$/m)
-  assert.match(r.content, /^REF=resolved$/m)
+  assert.match(r.content, /^REF='resolved'$/m)
 })
 
 test("${BRACED} references resolve too", () => {
-  assert.equal(expandSecretsFile("A=${A}\n", { A: "v" }).content, "A=v\n")
+  assert.equal(expandSecretsFile("A=${A}\n", { A: "v" }).content, "A='v'\n")
 })
 
 // --- which branch ci names for the publish decision (C10) ---
@@ -350,4 +350,18 @@ test("ci passes no --branch when none is known, so the module refuses to publish
 
 test("summary takes --jobs", () => {
   assert.equal(argsFor(["summary", "reports", "--jobs", "needs.json"]).invalid, undefined)
+})
+
+test("resolved secrets are single-quoted, so Kamal's dotenv neither expands nor runs them", () => {
+  // Kamal parses .kamal/secrets with dotenv and inline command substitution: unquoted, `$rd`
+  // vanished from a password and `$(...)` would have run. Seen on dev-server.
+  const value = `p"w$rd\`x $(touch pwned) \\n #hash`
+  const r = expandSecretsFile("P=$P\n", { P: value })
+  assert.equal(r.content, `P='${value}'\n`)
+})
+
+test("a value with a single quote or a line break is refused, not mangled", () => {
+  assert.deepEqual(expandSecretsFile("A=$A\nB=$B\n", { A: "it's", B: "ok" }).unquotable, ["A"])
+  assert.deepEqual(expandSecretsFile("A=$A\n", { A: "two\nlines" }).unquotable, ["A"])
+  assert.equal(expandSecretsFile("A=$A\n", { A: "it's" }).content, undefined)
 })

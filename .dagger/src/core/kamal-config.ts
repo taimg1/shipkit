@@ -110,7 +110,8 @@ export function missingSecrets(declared: readonly string[], secretsFile: string)
   const provided = new Map<string, string>()
   for (const raw of secretsFile.split("\n")) {
     const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(raw.replace(/\s+$/, ""))
-    if (m) provided.set(m[1], m[2].trim())
+    // The wrapper writes resolved values single-quoted (bin/lib.mjs, expandSecretsFile).
+    if (m) provided.set(m[1], m[2].trim().replace(/^'(.*)'$/, "$1"))
   }
   return declared.filter((name) => {
     const value = provided.get(name)

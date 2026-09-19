@@ -1,4 +1,4 @@
-import { createHash, createHmac } from "node:crypto"
+import { createHash, createHmac, randomBytes } from "node:crypto"
 
 /**
  * The deploy host's public key, pinned in shipkit.yaml as `hostKey` — known_hosts lines.
@@ -143,6 +143,34 @@ export function knownHostsFor(env: { host?: string; sshPort: number; hostKey?: s
     )
   }
   return entries.map((e) => `${e.hosts} ${e.type} ${e.key}`).join("\n") + "\n"
+}
+
+/**
+ * known_hosts text with every plain host name replaced by OpenSSH's hashed form (`|1|salt|hmac`),
+ * one line per name. For the Kamal container only.
+ *
+ * Kamal connects through SSHKit, whose known_hosts lookup wants a plain entry to name the host
+ * AND its IP address together ("[host]:port,[ip]:port" is what it searches for, and it takes
+ * the intersection). A pinned line names the host alone, so every deploy was refused with
+ * HostKeyUnknown. A hashed entry is matched against each name on its own, so the pinned key is
+ * found by host name — and a different key presented for that name is still a HostKeyMismatch.
+ * Found on dev-server; the unit tests could not have seen it.
+ */
+export function hashKnownHosts(text: string, salt: () => Buffer = () => randomBytes(20)): string {
+  const lines: string[] = []
+  for (const e of parseKnownHosts(text)) {
+    for (const host of e.hosts.split(",")) {
+      // Already hashed, or a pattern: a pattern hashed is a pattern that matches nothing.
+      if (host.startsWith("|1|") || /[*?!]/.test(host)) {
+        lines.push(`${host} ${e.type} ${e.key}`)
+        continue
+      }
+      const s = salt()
+      const mac = createHmac("sha1", s).update(host).digest("base64")
+      lines.push(`|1|${s.toString("base64")}|${mac} ${e.type} ${e.key}`)
+    }
+  }
+  return lines.join("\n") + "\n"
 }
 
 /** The doctor line for one environment's pinned host key. */

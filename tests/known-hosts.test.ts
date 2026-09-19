@@ -1,6 +1,9 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { readFileSync } from "node:fs"
+import { spawnSync } from "node:child_process"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import {
   STRICT_SSH_CONFIG,
   checkHostKey,
@@ -9,6 +12,7 @@ import {
   knownHostsFor,
   knownHostsName,
   parseKnownHosts,
+  hashKnownHosts,
 } from "../.dagger/src/core/known-hosts.ts"
 
 // dev-server's committed host key, so the fixture's pin and the key the server offers are the
@@ -110,4 +114,30 @@ test("the fixture pins dev-server's committed host key", () => {
   assert.ok(hostKey, "fixtures/dotnet-api/shipkit.yaml has no hostKey")
   assert.equal(pub.split(" ").slice(0, 2).join(" "), ED)
   assert.equal(knownHostsFor({ host: "host.docker.internal", sshPort: 2222, hostKey }), `[host.docker.internal]:2222 ${ED}\n`)
+})
+
+test("the Kamal copy is hashed per name, and OpenSSH still finds the pinned key by host name", () => {
+  // SSHKit (Kamal) only matches a plain entry that names the host and its IP together; a hashed
+  // entry is matched by name alone. Found on dev-server, where every deploy was refused.
+  const line = "[host.docker.internal]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINzSeby1W18fIv7pys7p0Pe4xiOEGK65dXpurYBTf5d1"
+  const hashed = hashKnownHosts(line)
+  assert.match(hashed, /^\|1\|[^|]+\|\S+ ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINzSeby1W18fIv7pys7p0Pe4xiOEGK65dXpurYBTf5d1\n$/)
+  assert.doesNotMatch(hashed, /host\.docker\.internal/)
+
+  const dir = mkdtempSync(join(tmpdir(), "shipkit-kh-"))
+  try {
+    const file = join(dir, "known_hosts")
+    writeFileSync(file, hashed)
+    const found = spawnSync("ssh-keygen", ["-F", "[host.docker.internal]:2222", "-f", file], { encoding: "utf8" })
+    assert.equal(found.status, 0, found.stderr)
+    const other = spawnSync("ssh-keygen", ["-F", "[evil.example]:2222", "-f", file], { encoding: "utf8" })
+    assert.notEqual(other.status, 0)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("a line naming several hosts becomes one hashed line per host", () => {
+  const out = hashKnownHosts("a.example,b.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINzSeby1W18fIv7pys7p0Pe4xiOEGK65dXpurYBTf5d1")
+  assert.equal(out.trim().split("\n").length, 2)
 })

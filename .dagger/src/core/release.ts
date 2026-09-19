@@ -3,7 +3,7 @@ import { Environment } from "../config.js"
 import { EXIT, ShipkitError, configError, infraError } from "../errors.js"
 import { KAMAL_IMAGE } from "./images.js"
 import { hostKeyRefusal, kamalHostKeyProblem } from "./kamal-config.js"
-import { STRICT_SSH_CONFIG, hostKeyHint, knownHostsFor } from "./known-hosts.js"
+import { STRICT_SSH_CONFIG, hashKnownHosts, hostKeyHint, knownHostsFor } from "./known-hosts.js"
 import { remoteScript, sshContainer } from "./ssh.js"
 import { LockHolder, lockAcquireScript, lockReleaseScript, parseLockAcquire, unlockCommand } from "./deploy-lock.js"
 import { containerVersionsScript, parseContainerVersions } from "./server-probe.js"
@@ -54,7 +54,8 @@ export async function kamal(
     .withDirectory("/workdir", source)
     .withWorkdir("/workdir")
     .withMountedSecret("/root/.ssh/id_ed25519", key)
-    .withNewFile("/root/.ssh/known_hosts", knownHosts)
+    // Hashed: SSHKit only matches a plain entry that also names the IP (hashKnownHosts).
+    .withNewFile("/root/.ssh/known_hosts", hashKnownHosts(knownHosts))
     .withNewFile("/root/.ssh/config", STRICT_SSH_CONFIG)
     // Kamal asks the server what is running; a cached answer would describe a past deploy.
     .withEnvVariable("SHIPKIT_NO_CACHE", Date.now().toString())

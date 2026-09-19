@@ -332,14 +332,20 @@ export function translate(key, opts, ctx) {
       return withBase(["db-pending", ...src])
     case "deploy": {
       const target = [...src, `--env=${opts.env || "prod"}`, `--sha=${sha()}`]
-      if (opts.plan) return ["deploy-plan", ...target, ...credentials(opts, ctx.env)]
+      // The plan token names the stages (B7), so the plan is built for the same --stage the
+      // deploy will be given.
+      const stage = opts.stage ? [`--stage=${opts.stage}`] : []
+      if (opts.plan) return ["deploy-plan", ...target, ...credentials(opts, ctx.env), ...stage]
       if (typeof opts.yes === "string") {
+        // Recorded in the server-side deploy lock, so a refused deploy can say who holds it.
+        const actor = ctx.env.GITHUB_ACTOR || ctx.env.USER || ctx.env.USERNAME
         return [
           "deploy",
           ...target,
           ...credentials(opts, ctx.env, { dbUrl: true }),
           `--plan-token=${opts.yes}`,
-          ...(opts.stage ? [`--stage=${opts.stage}`] : []),
+          ...stage,
+          ...(actor ? [`--actor=${actor}`] : []),
         ]
       }
       return null

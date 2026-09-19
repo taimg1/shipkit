@@ -4,6 +4,7 @@
  * Every function returns a JSON report (docs/cli-design.md). The `shipkit` wrapper renders
  * it; `dagger call` prints it raw. Both paths are supported, permanently (ADR 0009).
  */
+import { randomUUID } from "node:crypto"
 import { argument, dag, Container, Directory, File, Platform, Secret, func, object } from "@dagger.io/dagger"
 import { Config, loadConfig } from "./config.js"
 import { selectAdapter } from "./adapters/index.js"
@@ -17,7 +18,7 @@ import { backup as backupProduction, BackupResult } from "./core/backup.js"
 import { migrate as runMigrations } from "./core/migrate.js"
 import { lastApplied } from "./core/history.js"
 import { dockerPlatform, SUPPORTED_RIDS } from "./core/platform.js"
-import { parseStages, stageRuns } from "./core/stage-select.js"
+import { deployStageProblem, parseStages, selectedStages, stageRuns } from "./core/stage-select.js"
 import { imageTag, publishDecision, publishedDigest } from "./core/publish-gate.js"
 import { versionMatchesTag } from "./core/health.js"
 import { parseVersionProbe, versionProbeScript } from "./core/server-probe.js"
@@ -25,10 +26,13 @@ import { remoteScript, sshContainer } from "./core/ssh.js"
 import { servingVersion as servingHealth } from "./core/verify.js"
 import { waitForDatabase } from "./core/postgres-remote.js"
 import {
+  acquireDeployLock,
   bootDatabase,
   clean as cleanServer,
   currentVersion,
+  pullImage,
   release as releaseImage,
+  releaseDeployLock,
   rollback as rollbackTo,
 } from "./core/release.js"
 import { verify as verifyHealth } from "./core/verify.js"
@@ -68,6 +72,14 @@ function unknownStage(unknown: string[], known: string[]): ShipkitError {
   return configError(
     `not a stage of this command: ${names}`,
     `Stages, in order: ${known.join(", ")}. Several may be given as --stage=build,push.`,
+  )
+}
+
+/** A stage set that skips a gate the plan depends on (deployStageProblem). */
+function unsafeStages(problem: string): ShipkitError {
+  return configError(
+    `refusing this stage set: ${problem}`,
+    "Run the whole deploy (no --stage), or a set that keeps backup -> migrate -> release -> verify together.",
   )
 }
 
@@ -304,6 +316,8 @@ export class Shipkit {
     sha = "dev",
     sshKey?: Secret,
     registryToken?: Secret,
+    /** The stages the deploy will run, as `deploy --stage` takes them. The token names them (B7). */
+    stage?: string,
   ): Promise<string> {
     const r = new ReportBuilder("deploy --plan", sha)
     try {
@@ -316,8 +330,16 @@ export class Shipkit {
         )
       }
 
-      const plan = await buildPlan(source, cfg, env, target, adapter, sha, sshKey, cfg.health, registryToken)
+      const stages = parseStages(stage, DEPLOY_STAGES)
+      if (stages.unknown.length > 0) throw unknownStage(stages.unknown, DEPLOY_STAGES)
+
+      const plan = await buildPlan(
+        source, cfg, env, target, adapter, sha, sshKey, cfg.health, registryToken,
+        selectedStages(stages, DEPLOY_STAGES),
+      )
       r.set("plan", plan)
+      const unsafe = deployStageProblem(stages, plan.migrations.length)
+      if (unsafe) throw unsafeStages(unsafe)
       r.set("rendered", renderPlan(plan))
       return serialize(r.success())
     } catch (err) {
@@ -353,11 +375,15 @@ export class Shipkit {
      * Kamal deploys an empty string in their place (#19).
      */
     kamalSecrets?: Secret,
+    /** Who is deploying, for the deploy lock's holder record. Informational only. */
+    actor?: string,
   ): Promise<string> {
     const r = new ReportBuilder("deploy", sha)
     const tag = imageTag(sha)
     let previousVersion: string | null = null
     let plannedProvision: string[] = []
+    // Set once the server-side deploy lock is held; released before the report is written.
+    let unlock: (() => Promise<void>) | null = null
 
     try {
       const { cfg, adapter, target } = await resolveTarget(source, env)
@@ -416,8 +442,14 @@ export class Shipkit {
         }
       }
 
-      const plan = await buildPlan(source, cfg, env, target, adapter, sha, sshKey, cfg.health, registryToken)
+      const plan = await buildPlan(
+        source, cfg, env, target, adapter, sha, sshKey, cfg.health, registryToken,
+        selectedStages(stages, DEPLOY_STAGES),
+      )
         r.set("plan", plan)
+        // Refused whatever the token says: a plan cannot confirm skipping a gate (B7).
+        const unsafe = deployStageProblem(stages, plan.migrations.length)
+        if (unsafe) throw unsafeStages(unsafe)
         if (plan.token !== planToken) {
           throw new ShipkitError(
             EXIT.CONFIRM,
@@ -427,6 +459,32 @@ export class Shipkit {
         }
         previousVersion = plan.currentImageTag
         plannedProvision = plan.provision
+
+        // One deploy at a time, from here until verify/rollback is done (B13). Kamal's own
+        // lock only covers its commands, which start after the backup and the migrations.
+        const lockId = randomUUID()
+        await acquireDeployLock(target, sshKey, cfg.service, {
+          id: lockId, sha, env, actor: actor ?? "unknown",
+        })
+        unlock = async () => {
+          r.set("lock", await releaseDeployLock(target, sshKey, cfg.service, lockId))
+        }
+
+        // Before anything changes: the image release will pull must be pullable. release uses
+        // --skip-push, so a missing image used to surface after the migrations (B4).
+        if (only("release")) {
+          try {
+            await pullImage(source, target, sshKey, tag, registryToken, kamalSecrets)
+          } catch (err) {
+            throw new ShipkitError(
+              EXIT.GATE,
+              `the image ${tag} cannot be pulled onto ${target.host}: ${err instanceof Error ? err.message.slice(0, 300) : err}`,
+              "Nothing was changed. Is this commit published? Only a green `ci` on " +
+                `${cfg.defaultBranch} pushes an image. Check the registry in config/deploy.yml and its credentials.`,
+            )
+          }
+          r.set("image", `${tag} pulled onto ${target.host}`)
+        }
       }
 
       if (plannedProvision.length > 0) {
@@ -469,7 +527,7 @@ export class Shipkit {
             const result = await runMigrations(
               source, cfg, target, adapter.db!, sshKey, dbUrl, pending, backupResult,
             )
-            return withDetail(result, { from, applied: result.applied })
+            return withDetail(result, { from, applied: result.applied, timeouts: cfg.migrationTimeouts })
           })
         }
       } else r.skip("migrate", "not selected")
@@ -518,9 +576,14 @@ export class Shipkit {
         })
       } else r.skip("clean", "not selected")
 
+      if (unlock) {
+        await unlock()
+        unlock = null
+      }
       r.skipRemaining(DEPLOY_STAGES)
       return serialize(r.success())
     } catch (err) {
+      if (unlock) await unlock()
       r.skipRemaining(DEPLOY_STAGES)
       return serialize(r.failure(err))
     }

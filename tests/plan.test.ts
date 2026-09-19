@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { planToken } from "../.dagger/src/core/plan-token.ts"
+import { planToken, renderPlan } from "../.dagger/src/core/plan-token.ts"
 
 const base = {
   env: "prod",
@@ -72,4 +72,25 @@ test("provisioning the server is part of what the token confirms", () => {
   // Booting a production database on a first deploy is a change; a token shown for a
   // server that already had one must not authorise it (#13).
   assert.notEqual(planToken(base), planToken({ ...base, provision: ["boot the database accessory (first deploy to this server)"] }))
+})
+
+test("the token names the stages it was shown for (B7)", () => {
+  // A plan confirmed for the whole deploy must not authorise running only part of it.
+  assert.notEqual(planToken(base), planToken({ ...base, stages: ["release", "verify", "rollback"] }))
+  assert.notEqual(
+    planToken({ ...base, stages: ["backup", "migrate"] }),
+    planToken({ ...base, stages: ["backup", "migrate", "release", "verify"] }),
+  )
+})
+
+test("no stage selection and an explicit null are the same plan", () => {
+  assert.equal(planToken(base), planToken({ ...base, stages: null }))
+})
+
+test("a partial plan says so, and its command carries the same --stage", () => {
+  const stages = ["backup", "migrate"]
+  const text = renderPlan({ ...base, stages, token: "abc" } as never)
+  assert.match(text, /stages {6}backup, migrate only/)
+  assert.match(text, /shipkit deploy --yes=abc --stage=backup,migrate$/m)
+  assert.doesNotMatch(renderPlan({ ...base, token: "abc" } as never), /--stage/)
 })

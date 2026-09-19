@@ -31,6 +31,13 @@ export const DESTRUCTIVE = [
  */
 export const ALLOW_LOSS = /--\s*shipkit:allow-loss\s+([A-Za-z0-9_."]+)/gi
 
+/**
+ * The marker as the gates suggest it. One definition, so the advice a failing gate prints and
+ * the pattern above cannot drift apart again — they did: the gate once suggested a
+ * `shipkit:destructive-ok` marker that nothing read (B17).
+ */
+export const ALLOW_LOSS_EXAMPLE = "-- shipkit:allow-loss <table>.<column>  <reason>"
+
 /** Targets the author has explicitly accepted losing, in file order. */
 export function parseAllowedLosses(sqlText: string): string[] {
   const out: string[] = []
@@ -43,8 +50,62 @@ export function parseAllowedLosses(sqlText: string): string[] {
   return out
 }
 
-/** The identifier a target ultimately names — `orders.CreatedAt` → `CreatedAt`. */
-const leaf = (target: string) => target.split(".").pop() ?? target
+/** A PostgreSQL identifier: quoted (case kept, `""` escapes a quote) or bare (folded to lower case). */
+const IDENT = String.raw`(?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)`
+/** An identifier with an optional schema: `orders`, `public."Orders"`. */
+const QUALIFIED = String.raw`${IDENT}(?:\s*\.\s*${IDENT})*`
+
+/** What PostgreSQL makes of an identifier as written — `"CreatedAt"` → `CreatedAt`, `Orders` → `orders`. */
+function identName(raw: string): string {
+  const t = raw.trim()
+  return t.startsWith('"') ? t.slice(1, -1).replace(/""/g, '"') : t.toLowerCase()
+}
+
+/** The table a possibly schema-qualified name refers to, without the schema — as the snapshot names it. */
+function tableName(qualified: string): string {
+  const parts = qualified.match(new RegExp(IDENT, "g")) ?? [qualified]
+  return identName(parts[parts.length - 1])
+}
+
+/**
+ * What one statement line destroys or renames, as allow-loss targets: `orders` for a table,
+ * `orders.CreatedAt` for a column. Null when the line cannot be read that way — and a line
+ * that cannot be read is never waived.
+ */
+export function statementTargets(line: string): string[] | null {
+  const clean = stripNoise(line)
+
+  const drop = new RegExp(String.raw`\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(${QUALIFIED}(?:\s*,\s*${QUALIFIED})*)`, "i").exec(clean)
+  if (drop) {
+    return drop[1].split(new RegExp(String.raw`\s*,\s*(?=${IDENT})`)).map(tableName)
+  }
+
+  const alter = new RegExp(String.raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(${QUALIFIED})([\s\S]*)$`, "i").exec(clean)
+  if (!alter) return null
+  const table = tableName(alter[1])
+  const rest = alter[2]
+
+  const columns: string[] = []
+  const column = new RegExp(
+    String.raw`\b(?:DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?|ALTER\s+COLUMN\s+|RENAME\s+COLUMN\s+)(${IDENT})`,
+    "gi",
+  )
+  for (const m of rest.matchAll(column)) columns.push(`${table}.${identName(m[1])}`)
+  return columns.length > 0 ? columns : [table]
+}
+
+/**
+ * Whether the author named everything this line touches. Exact, never a substring: allowing
+ * `orders.Id` must not allow dropping `invoices.CustomerId`, and allowing a table allows its
+ * columns with it — the same rule unacknowledgedLosses applies to the apply-to-copy result.
+ */
+export function allowedByMarker(line: string, allowed: string[]): boolean {
+  if (allowed.length === 0) return false
+  const targets = statementTargets(line)
+  if (!targets || targets.length === 0) return false
+  const set = new Set(allowed)
+  return targets.every((t) => set.has(t) || set.has(t.split(".")[0]))
+}
 
 /**
  * Squawk rules that an allow-loss marker may waive: the ones that say "you are removing or
@@ -66,9 +127,10 @@ export const WAIVABLE_SQUAWK_RULES = new Set([
 /**
  * Drops findings that a marker has accounted for.
  *
- * A finding is waived only when its own line mentions something the author named. Squawk
- * reports a line number, so the match is against that statement rather than the whole file:
- * a waiver for one column must not silence a different drop elsewhere in the migration.
+ * A finding is waived only when everything its own line touches is something the author
+ * named (allowedByMarker). Squawk reports a line number, so the match is against that
+ * statement rather than the whole file: a waiver for one column must not silence a different
+ * drop elsewhere in the migration.
  */
 export function applyAllowances(
   findings: Finding[],
@@ -76,13 +138,12 @@ export function applyAllowances(
   allowed: string[],
 ): Finding[] {
   if (allowed.length === 0) return findings
-  const names = allowed.map(leaf)
   const lines = stripBom(sqlText).split("\n")
 
   return findings.filter((f) => {
     if (!WAIVABLE_SQUAWK_RULES.has(f.rule)) return true
     const line = f.line != null ? (lines[f.line - 1] ?? "") : ""
-    return !names.some((n) => stripNoise(line).includes(n))
+    return !allowedByMarker(line, allowed)
   })
 }
 
@@ -125,7 +186,7 @@ export function scanDestructive(sqlText: string): Finding[] {
   // Noise is stripped before anything is matched. A marker inside a string literal — seeded
   // data, a comment column, a user-supplied value — must not disable the gate; that would be
   // a fail-open hole reachable by anyone who can write a row of test data.
-  const allowed = parseAllowedLosses(sqlText).map(leaf)
+  const allowed = parseAllowedLosses(sqlText)
 
   lines.forEach((line, i) => {
     const clean = stripNoise(line)
@@ -133,7 +194,7 @@ export function scanDestructive(sqlText: string): Finding[] {
       if (!d.re.test(clean)) continue
       // A statement is waived only when it touches something the author named. A marker for
       // one column does not excuse dropping a different one in the same migration.
-      if (allowed.some((name) => clean.includes(name))) continue
+      if (allowedByMarker(line, allowed)) continue
       findings.push({ rule: d.rule, file: "migration.sql", line: i + 1, sql: line.trim() })
     }
   })
@@ -141,7 +202,17 @@ export function scanDestructive(sqlText: string): Finding[] {
 }
 
 /**
- * Parses Squawk's JSON reporter output.
+ * Squawk's exit code when it ran and found violations. Observed on squawk-cli 2.65.0: 0 with
+ * `[]` on a clean file, 1 with a JSON array of violations otherwise.
+ *
+ * 1 is ALSO what it exits with when it did not lint anything — a missing file, a broken
+ * `.squawk.toml` — and then stdout is empty and the reason is on stderr. So the exit code
+ * alone never decides; the output has to agree with it.
+ */
+export const SQUAWK_VIOLATIONS_EXIT = 1
+
+/**
+ * Reads one Squawk run: its exit code and its JSON reporter output.
  *
  * Verified against squawk-cli 2.65.0. Each item carries:
  *   { file, line, column, level, message, help, rule_name, line_end, column_end }
@@ -149,24 +220,46 @@ export function scanDestructive(sqlText: string): Finding[] {
  * `line` is ZERO-BASED. Reporting it unchanged points the reader at the wrong line, which
  * for a linter is worse than reporting no line at all.
  *
- * Unparseable output is reported as a finding rather than as a pass: a linter result we
- * cannot read is not a green light.
+ * Exactly two answers are a result: exit 0 with an array, and exit 1 with a non-empty array
+ * of violations. Anything else — another exit code, empty stdout, output that is not the
+ * reporter's shape — is reported as a finding rather than as a pass: a linter result we
+ * cannot read is not a green light, and "Squawk printed nothing" used to read as "0 violations".
  */
-export function parseSquawk(raw: string): Finding[] {
+export function parseSquawk(raw: string, exitCode: number, stderr = ""): Finding[] {
   const text = raw.trim()
-  if (text.length === 0) return []
+  const failed = (why: string): Finding[] => [
+    {
+      rule: "squawk-did-not-run",
+      message: `${why} (exit ${exitCode})${stderr.trim() ? `: ${stderr.trim().slice(0, 500)}` : ""}`,
+    },
+  ]
+
+  if (exitCode !== 0 && exitCode !== SQUAWK_VIOLATIONS_EXIT) return failed("Squawk exited with an unexpected code")
+  if (text.length === 0) return failed("Squawk printed no report")
+
+  let parsed: unknown
   try {
-    const parsed = JSON.parse(text)
-    const items = Array.isArray(parsed) ? parsed : [parsed]
-    return items.map((i: Record<string, unknown>) => ({
-      rule: String(i.rule_name ?? i.rule ?? "unknown"),
-      file: typeof i.file === "string" ? i.file : undefined,
-      line: typeof i.line === "number" ? i.line + 1 : undefined,
-      message: [i.message, i.help].filter(Boolean).join(" — ") || undefined,
-    }))
+    parsed = JSON.parse(text)
   } catch {
     return [{ rule: "squawk-output-unparseable", message: text.slice(0, 500) }]
   }
+  const valid =
+    Array.isArray(parsed) &&
+    parsed.every((i) => typeof i === "object" && i !== null && typeof (i as Record<string, unknown>).rule_name === "string")
+  if (!valid) return [{ rule: "squawk-output-unparseable", message: text.slice(0, 500) }]
+
+  const items = parsed as Record<string, unknown>[]
+  // Violations reported with an exit code that says there were none, or the reverse: one of
+  // the two is wrong, and the gate cannot know which.
+  if (exitCode === SQUAWK_VIOLATIONS_EXIT && items.length === 0) {
+    return failed("Squawk reported failure but listed no violations")
+  }
+  return items.map((i) => ({
+    rule: String(i.rule_name),
+    file: typeof i.file === "string" ? i.file : undefined,
+    line: typeof i.line === "number" ? i.line + 1 : undefined,
+    message: [i.message, i.help].filter(Boolean).join(" — ") || undefined,
+  }))
 }
 
 /**

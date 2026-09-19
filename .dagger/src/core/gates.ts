@@ -1,5 +1,6 @@
 import { Finding } from "../report.js"
 import { EXIT, ShipkitError } from "../errors.js"
+import { ALLOW_LOSS_EXAMPLE } from "./sql-scan.js"
 
 /**
  * The four gates of ADR 0004 all fail closed. A gate that logs a warning and continues is
@@ -33,8 +34,9 @@ export const destructiveSql = (findings: Finding[]) =>
   new GateFailure(
     "destructive-sql",
     `migration contains ${findings.length} destructive statement(s) without an intent marker`,
-    'If this is intentional, emit migrationBuilder.Sql("-- shipkit:destructive-ok <reason>") ' +
-      "in the same migration. If it is a renamed property, use RenameColumn instead — EF " +
+    "If this is intentional, name what is lost in the same migration: " +
+      `migrationBuilder.Sql("${ALLOW_LOSS_EXAMPLE}") ` +
+      "(or <table> for a whole table). If it is a renamed property, use RenameColumn instead — EF " +
       "generates DROP + ADD and the data is silently lost.",
     findings,
   )

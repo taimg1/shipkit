@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { parseStages, stageRuns } from "../.dagger/src/core/stage-select.ts"
+import { deployStageProblem, parseStages, selectedStages, stageRuns } from "../.dagger/src/core/stage-select.ts"
 
 const CI = ["pre", "build", "test", "db", "push"]
 
@@ -40,4 +40,40 @@ test("an unknown stage is reported, never ignored", () => {
 
 test("an empty --stage is refused rather than read as all or none", () => {
   assert.deepEqual(parseStages("", CI).unknown, [""])
+})
+
+// --- deploy stage sets (B7) ---
+
+const DEPLOY = ["provision", "backup", "migrate", "release", "verify", "rollback", "clean"]
+const sel = (spec?: string) => parseStages(spec, DEPLOY)
+
+test("the stage list a token confirms is in pipeline order, and null for everything", () => {
+  assert.equal(selectedStages(sel(), DEPLOY), null)
+  assert.equal(selectedStages(sel(DEPLOY.join(",")), DEPLOY), null, "every stage named is the same as none")
+  assert.deepEqual(selectedStages(sel("migrate,backup"), DEPLOY), ["backup", "migrate"])
+})
+
+test("the whole deploy is fine", () => {
+  assert.equal(deployStageProblem(sel(), 3), null)
+})
+
+test("release without verify is refused, migrations or not", () => {
+  assert.match(deployStageProblem(sel("release"), 0) ?? "", /without verify/)
+  assert.match(deployStageProblem(sel("backup,migrate,release,clean"), 2) ?? "", /without verify/)
+})
+
+test("release without migrate is refused while migrations are pending", () => {
+  assert.match(deployStageProblem(sel("release,verify,rollback"), 2) ?? "", /without migrate while 2/)
+  assert.equal(deployStageProblem(sel("release,verify,rollback"), 0), null, "nothing pending: a code-only release")
+})
+
+test("migrate without backup is refused while migrations are pending", () => {
+  assert.match(deployStageProblem(sel("migrate"), 1) ?? "", /without backup/)
+})
+
+test("read-only and partial sets that skip no gate are fine", () => {
+  assert.equal(deployStageProblem(sel("backup"), 5), null)
+  assert.equal(deployStageProblem(sel("verify"), 5), null)
+  assert.equal(deployStageProblem(sel("backup,migrate"), 5), null)
+  assert.equal(deployStageProblem(sel("clean"), 5), null)
 })

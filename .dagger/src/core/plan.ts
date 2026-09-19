@@ -46,6 +46,8 @@ export async function buildPlan(
   key: Secret,
   healthPath: string,
   registryPassword?: Secret,
+  /** The stages the deploy will run (selectedStages); null for all. Part of the token (B7). */
+  stages: string[] | null = null,
 ): Promise<DeployPlan> {
   const imageTag = tagFor(sha)
   const needsDb = cfg.db !== "none" && !!adapter.db
@@ -109,6 +111,7 @@ export async function buildPlan(
     // place. Not part of the token: taking a backup between plan and deploy changes nothing the
     // confirmation was about.
     lastVerifiedBackup: needsDb ? await newestBackup(env, key, cfg.service) : null,
+    stages,
   }
 
   return { ...base, token: planToken(base) }

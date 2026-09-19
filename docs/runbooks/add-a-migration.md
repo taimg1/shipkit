@@ -53,15 +53,48 @@ Name it, in the migration, where a reviewer will see it:
 migrationBuilder.Sql("-- shipkit:allow-loss orders.CreatedAt  superseded by CreatedOn in release N+1");
 ```
 
-The marker must name the exact table or column. It waives that one loss and nothing else — a
-second, unintended drop in the same migration is still refused. A marker that waives nothing
-fails the build, so they cannot be added preemptively.
+The marker must name the exact table or column — `<table>.<column>`, or `<table>` for the
+whole table and its columns, without a schema, spelled as PostgreSQL stores it (a quoted
+`"CreatedAt"` keeps its case, a bare `CreatedAt` is `createdat`). The match is exact, never a
+substring: `orders.Id` does not waive dropping `invoices.CustomerId`, nor `orders.IdLegacy`. A
+statement that touches several columns is waived only when every one of them is named. It
+waives that one loss and nothing else — a second, unintended drop in the same migration is
+still refused. A marker that waives nothing fails the build, so they cannot be added
+preemptively. There is no other marker; `shipkit:destructive-ok` is not one.
 
 The run still prints what it permitted, with the row count behind it:
 
 ```
 acknowledged: ['column "orders.CreatedAt" no longer exists (its table held 3 row(s) before the migration)']
 ```
+
+## Lock and statement timeouts
+
+EF sets neither `lock_timeout` nor `statement_timeout`, so Squawk's rules for them are
+excluded in the default `.squawk.toml` — because `migrate` sets both on the bundle's
+connection instead, through `PGOPTIONS`:
+
+```yaml
+# shipkit.yaml — the defaults
+migrations:
+  lockTimeout: 5s          # waiting longer than this for a lock means blocking traffic
+  statementTimeout: 15min  # stops a runaway; raise it for a long CREATE INDEX CONCURRENTLY
+```
+
+A migration that cannot get its lock in time fails, and nothing is applied: run the deploy
+again once the long transaction holding the table is gone. A `CREATE INDEX CONCURRENTLY` that
+hits `statementTimeout` leaves an `INVALID` index behind — drop it in a follow-up migration
+and raise the timeout, do not work around it by hand.
+
+A production connection string that sets its own `Options=` is refused: Npgsql would let it
+override `PGOPTIONS`, and the migration would run with no timeouts at all.
+
+## If Squawk itself fails
+
+Squawk exits 0 with `[]` for a clean script and 1 with a list of violations. Anything else —
+another exit code, an empty report, output that is not its JSON — fails the gate as
+`squawk-did-not-run` or `squawk-output-unparseable`, with Squawk's stderr. That is almost
+always a broken `.squawk.toml`; it is never a pass.
 
 ## Keep the seed honest
 

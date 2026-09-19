@@ -12,6 +12,7 @@ import {
 } from "./ssh-command.js"
 import { RUNTIME_DEPS_VERSIONS, runtimeDepsImage } from "./images.js"
 import type { BackupResult } from "./backup.js"
+import { pgOptions, refuseOwnOptions } from "./migrate-options.js"
 
 /**
  * A glibc runtime with no SDK and no source — what a self-contained bundle needs and nothing
@@ -88,7 +89,15 @@ export async function migrate(
     // script text or a Dagger layer. How it reaches the server is in ssh-command.ts.
     .withSecretVariable("SHIPKIT_DB_URL", dbUrl)
     .withExec(["sh", "-c", copyBundleCommand(env, "/bundle/efbundle", dir)])
-    .withExec(["sh", "-c", runBundleCommand(env, dir, bundleRunner(cfg.stackVersion))])
+    // lock_timeout and statement_timeout reach the bundle's connection through PGOPTIONS, which
+    // Npgsql reads only when the connection string has no Options of its own — so one that does
+    // is refused first rather than silently winning (B5).
+    .withExec([
+      "sh",
+      "-c",
+      `${refuseOwnOptions("SHIPKIT_DB_URL")}; ` +
+        runBundleCommand(env, dir, bundleRunner(cfg.stackVersion), { pgOptions: pgOptions(cfg.migrationTimeouts) }),
+    ])
 
   try {
     await runner.sync()

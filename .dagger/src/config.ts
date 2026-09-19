@@ -4,6 +4,7 @@ import { configError } from "./errors.js"
 import { hostKeyHint, parseKnownHosts } from "./core/known-hosts.js"
 import { configProblem } from "./config-validate.js"
 import { parseRetention } from "./core/backup-store.js"
+import { DEFAULT_MIGRATION_TIMEOUTS, MigrationTimeouts, pgDuration } from "./core/migrate-options.js"
 
 export type StackName = "dotnet" | "nest" | "next" | "custom"
 export type DbKind = "postgres" | "none"
@@ -61,6 +62,11 @@ export interface Config {
   backupRetention: number
   /** Deploy targets by name; `prod` must exist for `deploy`. */
   environments: Record<string, Environment>
+  /**
+   * lock_timeout and statement_timeout for the connection the migration bundle opens
+   * (`migrations:` in shipkit.yaml). They are why Squawk's two timeout rules can stay excluded.
+   */
+  migrationTimeouts: MigrationTimeouts
 }
 
 export interface Environment {
@@ -181,6 +187,20 @@ export async function loadConfig(source: Directory): Promise<Config> {
     }
   }
 
+  const rawMigrations = (c.migrations ?? {}) as Record<string, unknown>
+  const migrationTimeouts = { ...DEFAULT_MIGRATION_TIMEOUTS }
+  for (const key of ["lockTimeout", "statementTimeout"] as const) {
+    if (rawMigrations[key] === undefined) continue
+    const value = pgDuration(rawMigrations[key])
+    if (value === null) {
+      throw configError(
+        `migrations.${key} must be a PostgreSQL duration with a unit, e.g. "5s" or "15min"`,
+        "A bare number is milliseconds to PostgreSQL, and 0 switches the timeout off.",
+      )
+    }
+    migrationTimeouts[key] = value
+  }
+
   const config: Config = {
     kit: c.kit as string | undefined,
     stack: stack as StackName,
@@ -198,6 +218,7 @@ export async function loadConfig(source: Directory): Promise<Config> {
     publish: c.publish === undefined ? true : c.publish === true,
     backupRetention: retention.value,
     environments,
+    migrationTimeouts,
   }
   // Every value that reaches a shell is checked for shape here, before anything runs.
   const problem = configProblem(config)

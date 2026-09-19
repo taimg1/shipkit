@@ -130,15 +130,19 @@ export function runBundleCommand(
   env: Environment,
   dir: string,
   image: string,
+  opts: { pgOptions?: string } = {},
   dsnVar = "SHIPKIT_DB_URL",
 ): string {
   const bundle = `${dir}/efbundle`
+  // Server options for the bundle's connection (lock_timeout, statement_timeout — see
+  // migrate-options.ts), passed to the container as one quoted -e argument.
+  const pgOptions = opts.pgOptions ? `-e ${shq(`PGOPTIONS=${opts.pgOptions}`)} ` : ""
   const script = [
     "set -e",
     `dsn=$(printf '%s' "$SHIPKIT_DSN_B64" | base64 -d)`,
     `[ -n "$dsn" ] || { echo "shipkit: the connection string arrived empty" >&2; exit 1; }`,
     `chmod +x ${shq(bundle)}`,
-    `docker run --rm --network ${shq(env.network)} -v ${shq(`${bundle}:/efbundle:ro`)} ` +
+    `docker run --rm --network ${shq(env.network)} ${pgOptions}-v ${shq(`${bundle}:/efbundle:ro`)} ` +
       `${shq(image)} /efbundle --connection "$dsn"`,
   ].join("\n")
   const encoded = Buffer.from(script + "\n", "utf8").toString("base64")

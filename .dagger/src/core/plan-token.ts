@@ -33,6 +33,22 @@ export interface DeployPlan {
   sqlDigest: string
   sqlPreview: string
   destructive: boolean
+  /**
+   * What an allow-loss marker in the pending SQL says may be destroyed (core/sql-scan.ts).
+   *
+   * Carried on the plan rather than re-derived by whoever needs it: a waiver is part of what a
+   * confirmation is about, and a second scan of the same SQL somewhere else is a second
+   * implementation of the rule that decides whether a client loses a column.
+   */
+  allowLoss: string[]
+  /**
+   * The digest the registry serves for `imageTag`, or null when nothing answers for it —
+   * including when the project publishes no image at all.
+   *
+   * Part of the token because a tag can be pushed again: without it, a plan confirmed for
+   * `sha-abc` would still execute after `sha-abc` had become a different image.
+   */
+  imageDigest: string | null
   lastVerifiedBackup: string | null
   /**
    * The deploy stages this plan was shown for, in order; null (or absent) means all of them.
@@ -61,6 +77,8 @@ export function planToken(p: Omit<DeployPlan, "token">): string {
     provision: p.provision,
     migrations: p.migrations,
     sqlDigest: p.sqlDigest,
+    allowLoss: p.allowLoss ?? [],
+    imageDigest: p.imageDigest ?? null,
     stages: p.stages ?? "all",
   })
   return createHash("sha256").update(canonical).digest("hex").slice(0, 12)

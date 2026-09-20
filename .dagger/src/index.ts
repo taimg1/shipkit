@@ -111,6 +111,34 @@ function buildImage(source: Directory, cfg: Config, sha: string): Container {
 /** Excluded at the source boundary: build output busts Dagger's cache on every run. */
 const IGNORE = ["**/bin", "**/obj", "**/node_modules", "**/.git", "**/.shipkit"]
 
+
+/**
+ * Refuses when config/deploy.yml declares a secret that arrives empty.
+ *
+ * Kamal writes its env files from these on every command that touches the app — deploy and
+ * rollback alike — so an empty one is not a missing value, it is a deployed wrong value.
+ */
+async function refuseEmptySecrets(source: Directory, kamalSecrets?: Secret): Promise<void> {
+  let deployYml: string | null = null
+  try {
+    deployYml = await source.file("config/deploy.yml").contents()
+  } catch {
+    // No deploy.yml: Kamal would fail on its own, with its own message.
+    return
+  }
+  const declared = declaredSecrets(deployYml)
+  const provided = kamalSecrets ? await kamalSecrets.plaintext() : ""
+  const absent = missingSecrets(declared, provided)
+  if (absent.length > 0) {
+    throw new ShipkitError(
+      EXIT.CONFIG,
+      `config/deploy.yml declares secrets with no value: ${absent.join(", ")}`,
+      "Export them where the deploy runs, and list them in .kamal/secrets as " +
+        "NAME=$NAME. A secret that resolves to nothing is deployed as nothing.",
+    )
+  }
+}
+
 @object()
 export class Shipkit {
   /**
@@ -425,25 +453,7 @@ export class Shipkit {
       // must have a value. Kamal resolves a name it cannot find to an empty string and deploys
       // it, and only PostgreSQL is rude enough to refuse to start over one (#19).
       if (cfg.delivery === "kamal") {
-        let deployYml: string | null = null
-        try {
-          deployYml = await source.file("config/deploy.yml").contents()
-        } catch {
-          // No deploy.yml: Kamal would fail on its own, with its own message.
-        }
-        if (deployYml) {
-          const declared = declaredSecrets(deployYml)
-          const provided = kamalSecrets ? await kamalSecrets.plaintext() : ""
-          const absent = missingSecrets(declared, provided)
-          if (absent.length > 0) {
-            throw new ShipkitError(
-              EXIT.CONFIG,
-              `config/deploy.yml declares secrets with no value: ${absent.join(", ")}`,
-              "Export them where the deploy runs, and list them in .kamal/secrets as " +
-                "NAME=$NAME. A secret that resolves to nothing is deployed as nothing.",
-            )
-          }
-        }
+        await refuseEmptySecrets(source, kamalSecrets)
       }
 
       const plan = await buildPlan(
@@ -743,6 +753,11 @@ export class Shipkit {
           "Tags are sha-<commit>. `shipkit deploy --plan` shows the one currently serving.",
         )
       }
+
+      // The same check the deploy makes. Kamal writes its env files from these on every
+      // command it runs, rollback included: with nothing behind them the old image comes back
+      // up holding an empty connection string.
+      await refuseEmptySecrets(source, kamalSecrets)
 
       const before = await servingHealth(target, cfg.health)
       r.set("serving", before ?? "nothing is answering")

@@ -365,3 +365,11 @@ test("a value with a single quote or a line break is refused, not mangled", () =
   assert.deepEqual(expandSecretsFile("A=$A\n", { A: "two\nlines" }).unquotable, ["A"])
   assert.equal(expandSecretsFile("A=$A\n", { A: "it's" }).content, undefined)
 })
+
+test("rollback passes the resolved Kamal secrets, like deploy", () => {
+  // A rollback with empty secrets boots the old image with an empty connection string: /health
+  // answers and the application reaches nothing. Seen on dev-server.
+  const env = { SHIPKIT_SSH_KEY: "/k", SHIPKIT_KAMAL_SECRETS: "POSTGRES_PASSWORD='x'\n" }
+  const args = translate("rollback", { _: ["rollback", "sha-abcdef0"] }, { env, sha: "abc", branch: "main" })
+  assert.ok(args.includes("--kamal-secrets=env:SHIPKIT_KAMAL_SECRETS"), args.join(" "))
+})

@@ -371,7 +371,10 @@ async function main() {
   // empty string and deploy as one (#19). Resolved here, where the environment is, and refused
   // here when something has nothing behind it: before the server is touched, not after the
   // database accessory has booted without a password.
-  if (key === "deploy" && typeof opts.yes === "string") {
+  // rollback runs Kamal too, and a rollback with empty secrets boots the old image with an
+  // empty connection string: /health answers, the application reaches nothing. Seen on
+  // dev-server — the readiness check is what caught it.
+  if ((key === "deploy" && typeof opts.yes === "string") || key === "rollback") {
     const secretsPath = join(".kamal", "secrets")
     if (existsSync(secretsPath)) {
       const resolved = expandSecretsFile(readFileSync(secretsPath, "utf8"), process.env)

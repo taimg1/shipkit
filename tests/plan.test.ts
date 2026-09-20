@@ -13,6 +13,8 @@ const base = {
   sqlDigest: "abc123",
   sqlPreview: "12 lines",
   destructive: false,
+  allowLoss: [] as string[],
+  imageDigest: "sha256:" + "a".repeat(64),
   lastVerifiedBackup: "2026-09-10T03:00:00Z",
 }
 
@@ -63,6 +65,8 @@ test("the token is stable across property order", () => {
     env: base.env,
     sqlPreview: base.sqlPreview,
     destructive: base.destructive,
+    allowLoss: base.allowLoss,
+    imageDigest: base.imageDigest,
     lastVerifiedBackup: base.lastVerifiedBackup,
   }
   assert.equal(planToken(base), planToken(reordered as never))
@@ -93,4 +97,30 @@ test("a partial plan says so, and its command carries the same --stage", () => {
   assert.match(text, /stages {6}backup, migrate only/)
   assert.match(text, /shipkit deploy --yes=abc --stage=backup,migrate$/m)
   assert.doesNotMatch(renderPlan({ ...base, token: "abc" } as never), /--stage/)
+})
+
+test("a waiver added to the migration invalidates the token", () => {
+  // An allow-loss marker changes the SQL, so sqlDigest would catch it too — but the plan
+  // carries the targets in their own right, and what the policy reads must be what the token
+  // covers. A waiver that could appear between showing a plan and executing it is a loss
+  // nobody confirmed.
+  assert.notEqual(planToken(base), planToken({ ...base, allowLoss: ["orders.CreatedAt"] }))
+  assert.notEqual(
+    planToken({ ...base, allowLoss: ["orders.CreatedAt"] }),
+    planToken({ ...base, allowLoss: ["orders.CreatedAt", "invoices"] }),
+  )
+})
+
+test("the image behind the tag is part of what the token confirms", () => {
+  // A tag can be pushed again. Without the digest, a plan confirmed for sha-a1b2c3d would
+  // still execute after sha-a1b2c3d had become a different image.
+  assert.notEqual(planToken(base), planToken({ ...base, imageDigest: "sha256:" + "b".repeat(64) }))
+  assert.notEqual(planToken(base), planToken({ ...base, imageDigest: null }))
+})
+
+test("plans that predate the new facts hash as if they carried none", () => {
+  // planToken is called with a plan under construction (buildPlan) and, in tests, with older
+  // shapes. An absent field must mean "nothing waived, no image" rather than throwing.
+  const { allowLoss, imageDigest, ...older } = base
+  assert.equal(planToken(older as never), planToken({ ...older, allowLoss: [], imageDigest: null } as never))
 })

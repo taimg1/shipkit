@@ -37,6 +37,7 @@ import {
 } from "./core/release.js"
 import { verify as verifyHealth } from "./core/verify.js"
 import { buildPlan, renderPlan } from "./core/plan.js"
+import { approvalFacts, autoApproveRefusal } from "./core/auto-approve.js"
 import { KamalSsh, checkSsh, declaredSecrets, kamalHostKeyProblem, missingSecrets, parseKamalSsh } from "./core/kamal-config.js"
 import { checkHostKey } from "./core/known-hosts.js"
 import { StackAdapter } from "./adapters/types.js"
@@ -405,6 +406,15 @@ export class Shipkit {
     kamalSecrets?: Secret,
     /** Who is deploying, for the deploy lock's holder record. Informational only. */
     actor?: string,
+    /**
+     * Lets the run confirm its own plan when nobody is there to — a merge to the default
+     * branch deploying itself (docs/cli-design.md, "Self-approval").
+     *
+     * It decides nothing: core/auto-approve.ts does, from the plan, and only for plans with
+     * nothing in them worth waking someone for. Anything else still stops with exit 4 and
+     * prints its token. Ignored when a plan token is given — a person already said yes.
+     */
+    autoApprove = false,
   ): Promise<string> {
     const r = new ReportBuilder("deploy", sha)
     const tag = imageTag(sha)
@@ -439,7 +449,10 @@ export class Shipkit {
         [...stages.selected].some((name) => !READ_ONLY_STAGES.includes(name))
 
       if (changesProduction) {
-        if (!planToken) {
+        // Neither a token nor leave to decide: stop, as this always has. `--auto-approve` is
+        // not a token and is not a bypass — it moves the yes from a person to the policy, and
+        // the policy says no to everything a person would have wanted to see.
+        if (!planToken && !autoApprove) {
           throw new ShipkitError(
             EXIT.CONFIRM,
             "this deploy would change production and has no plan token",
@@ -464,12 +477,38 @@ export class Shipkit {
         // Refused whatever the token says: a plan cannot confirm skipping a gate (B7).
         const unsafe = deployStageProblem(stages, plan.migrations.length)
         if (unsafe) throw unsafeStages(unsafe)
-        if (plan.token !== planToken) {
-          throw new ShipkitError(
-            EXIT.CONFIRM,
-            `the plan has changed since it was shown (token ${planToken} is now ${plan.token})`,
-            "Run `shipkit deploy --plan` again, look at what changed, and confirm the new plan.",
-          )
+        if (planToken) {
+          if (plan.token !== planToken) {
+            throw new ShipkitError(
+              EXIT.CONFIRM,
+              `the plan has changed since it was shown (token ${planToken} is now ${plan.token})`,
+              "Run `shipkit deploy --plan` again, look at what changed, and confirm the new plan.",
+            )
+          }
+        } else {
+          // Self-approval judges THIS plan — built from production a moment ago — and the
+          // deploy then executes exactly it. Nothing is re-planned afterwards, so there is no
+          // window between what the policy looked at and what runs.
+          await r.stage("approve", async () => {
+            const refusal = autoApproveRefusal(plan)
+            if (refusal) {
+              // The same thing `deploy --plan` prints, so the person this hands over to does
+              // not have to go and ask production the same questions again.
+              r.set("rendered", renderPlan(plan))
+              throw new ShipkitError(
+                EXIT.CONFIRM,
+                `this deploy cannot approve itself: ${refusal}`,
+                `A person has to confirm it:\n\n${renderPlan(plan)}`,
+              )
+            }
+            // The facts, not the verdict. "self-approved: true" is a claim; the day it is
+            // wrong is the day someone has to read which facts it was wrong about.
+            return withDetail(plan.token, {
+              approvedBy: "policy",
+              token: plan.token,
+              facts: approvalFacts(plan),
+            })
+          })
         }
         previousVersion = plan.currentImageTag
         plannedProvision = plan.provision

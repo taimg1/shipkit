@@ -70,6 +70,7 @@ Options for deploy
 
 Environment
   SHIPKIT_REGISTRY_TOKEN   registry credential
+  SHIPKIT_REGISTRY_USER    who that token belongs to (default: GITHUB_ACTOR, else "shipkit")
   SHIPKIT_SSH_KEY          path to the deploy key
   SHIPKIT_DATABASE_URL     production connection string, used by the migration bundle
   All are read by the engine and never passed as arguments.

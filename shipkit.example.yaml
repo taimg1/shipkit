@@ -22,6 +22,10 @@ project: src/Api
 migrationsProject: src/Infrastructure
 
 dockerfile: Dockerfile
+# The repository only — the kit appends :sha-<commit>. Lowercase, even when the GitHub
+# organisation is not: a registry refuses a capital letter. It must name the same image as
+# `registry.server` + `image:` in config/deploy.yml, which is what the server pulls
+# (docs/runbooks/registry.md).
 registry: ghcr.io/taimg1/client-api
 
 # Only merges to this branch publish an image. A branch build that pushed would put

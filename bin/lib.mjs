@@ -282,6 +282,13 @@ export function publishBranch(env, explicit, local) {
 }
 
 const REGISTRY_TOKEN_VAR = "SHIPKIT_REGISTRY_TOKEN"
+/**
+ * The username sent with that token. GITHUB_ACTOR covers GHCR from Actions and nothing else:
+ * a registry that checks the username refuses a correct token sent as the module's fallback,
+ * and outside Actions there was no way to say who the token belongs to. Not a secret — it is
+ * half of a basic-auth pair, and the half that is printed in `--explain`.
+ */
+const REGISTRY_USER_VAR = "SHIPKIT_REGISTRY_USER"
 const SSH_KEY_VAR = "SHIPKIT_SSH_KEY"
 const DB_URL_VAR = "SHIPKIT_DATABASE_URL"
 const KAMAL_SECRETS_VAR = "SHIPKIT_KAMAL_SECRETS"
@@ -334,7 +341,8 @@ export function translate(key, opts, ctx) {
 
       if (ctx.env[REGISTRY_TOKEN_VAR]) {
         a.push(`--registry-token=env:${REGISTRY_TOKEN_VAR}`)
-        if (ctx.env.GITHUB_ACTOR) a.push(`--registry-user=${ctx.env.GITHUB_ACTOR}`)
+        const user = ctx.env[REGISTRY_USER_VAR] || ctx.env.GITHUB_ACTOR
+        if (user) a.push(`--registry-user=${user}`)
       }
       return a
     }

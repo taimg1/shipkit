@@ -451,3 +451,14 @@ test("rollback passes the resolved Kamal secrets, like deploy", () => {
   const args = translate("rollback", { _: ["rollback", "sha-abcdef0"] }, { env, sha: "abc", branch: "main" })
   assert.ok(args.includes("--kamal-secrets=env:SHIPKIT_KAMAL_SECRETS"), args.join(" "))
 })
+
+test("deploy sends the registry username with the token, like ci", () => {
+  // The plan asks the registry whether this commit's image is published, and that answer is
+  // what lets a merge deploy itself. Under the wrong username a published image reads as
+  // absent: seen against a private registry.
+  const env = { SHIPKIT_SSH_KEY: "/k", SHIPKIT_REGISTRY_TOKEN: "t", SHIPKIT_REGISTRY_USER: "shipkit-ci" }
+  for (const opts of [{ _: ["deploy"], plan: true }, { _: ["deploy"], auto: true }]) {
+    const args = translate("deploy", opts, { env, sha: () => "a".repeat(40), branch: () => "main", dirty: () => false })
+    assert.ok(args.includes("--registry-user=shipkit-ci"), JSON.stringify(opts) + ": " + args.join(" "))
+  }
+})

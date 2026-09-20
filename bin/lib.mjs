@@ -335,7 +335,14 @@ function credentials(opts, env, { dbUrl = false } = {}) {
   // Only the stages that apply migrations take a connection string. Passing it to a function
   // that has no such parameter is an error, not a harmless extra.
   if (dbUrl && env[DB_URL_VAR]) args.push(`--db-url=env:${DB_URL_VAR}`)
-  if (env[REGISTRY_TOKEN_VAR]) args.push(`--registry-token=env:${REGISTRY_TOKEN_VAR}`)
+  if (env[REGISTRY_TOKEN_VAR]) {
+    args.push(`--registry-token=env:${REGISTRY_TOKEN_VAR}`)
+    // The same username `ci` sends. deploy asks the registry too — whether the image for this
+    // commit is published is what lets a merge deploy itself — and a probe under the wrong
+    // username reports a published image as absent.
+    const user = env[REGISTRY_USER_VAR] || env.GITHUB_ACTOR
+    if (user) args.push(`--registry-user=${user}`)
+  }
   // Set by the wrapper from the project's .kamal/secrets, with its references resolved (#19).
   if (env[KAMAL_SECRETS_VAR]) args.push(`--kamal-secrets=env:${KAMAL_SECRETS_VAR}`)
   return args

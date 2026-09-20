@@ -53,17 +53,25 @@ export async function probeServer(cfg: Config, env: Environment, key: Secret): P
  * means for every decision made from this: a deploy still needs a token, and a run that would
  * approve itself must not do so on an image nobody could confirm exists.
  */
-async function publishedImage(cfg: Config, tag: string, registryPassword?: Secret): Promise<string | null> {
+async function publishedImage(
+  cfg: Config,
+  tag: string,
+  registryPassword?: Secret,
+  registryUser?: string,
+): Promise<string | null> {
   // A project that publishes nothing has no registry to ask, and asking anyway would spend a
   // network round trip per plan to learn what shipkit.yaml already says.
   if (!cfg.publish || cfg.registry.length === 0) return null
 
   const address = `${cfg.registry}:${tag}`
   const host = cfg.registry.split("/")[0]
+  // The same username push() sends. Hardcoding one here made a published image look absent on
+  // any registry that does not take "shipkit" — a self-approval refused for the wrong reason,
+  // which is the least useful way to fail closed. Found against a private registry.
+  const user = registryUser && registryUser.length > 0 ? registryUser : DEFAULT_REGISTRY_USER
   try {
     let c = dag.container()
-    // The same default as push(): GHCR and friends take any username with a token.
-    if (registryPassword) c = c.withRegistryAuth(host, "shipkit", registryPassword)
+    if (registryPassword) c = c.withRegistryAuth(host, user, registryPassword)
     return publishedDigest(await c.from(address).imageRef())
   } catch {
     return null
@@ -88,6 +96,7 @@ export async function buildPlan(
   key: Secret,
   healthPath: string,
   registryPassword?: Secret,
+  registryUser?: string,
   /** The stages the deploy will run (selectedStages); null for all. Part of the token (B7). */
   stages: string[] | null = null,
 ): Promise<DeployPlan> {
@@ -152,7 +161,7 @@ export async function buildPlan(
     // What the author has written down as acceptable to lose. Read once, here, so the gates
     // and the self-approval policy cannot disagree about which losses were waived.
     allowLoss: parseAllowedLosses(sqlText),
-    imageDigest: await publishedImage(cfg, imageTag, registryPassword),
+    imageDigest: await publishedImage(cfg, imageTag, registryPassword, registryUser),
     // Read from the server's backup directory, where only verified dumps are ever renamed into
     // place. Not part of the token: taking a backup between plan and deploy changes nothing the
     // confirmation was about.

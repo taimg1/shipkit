@@ -345,6 +345,8 @@ export class Shipkit {
     sha = "dev",
     sshKey?: Secret,
     registryToken?: Secret,
+    /** The username sent with the token, as `ci` takes it: the plan asks the registry too. */
+    registryUser?: string,
     /** The stages the deploy will run, as `deploy --stage` takes them. The token names them (B7). */
     stage?: string,
   ): Promise<string> {
@@ -363,7 +365,7 @@ export class Shipkit {
       if (stages.unknown.length > 0) throw unknownStage(stages.unknown, DEPLOY_STAGES)
 
       const plan = await buildPlan(
-        source, cfg, env, target, adapter, sha, sshKey, cfg.health, registryToken,
+        source, cfg, env, target, adapter, sha, sshKey, cfg.health, registryToken, registryUser,
         selectedStages(stages, DEPLOY_STAGES),
       )
       r.set("plan", plan)
@@ -398,6 +400,8 @@ export class Shipkit {
     sshKey?: Secret,
     dbUrl?: Secret,
     registryToken?: Secret,
+    /** The username sent with the token, as `ci` takes it: the plan asks the registry too. */
+    registryUser?: string,
     /**
      * The project's .kamal/secrets with its references resolved by the wrapper. Without it the
      * container running Kamal has no values for anything the project declares as a secret, and
@@ -470,7 +474,7 @@ export class Shipkit {
       }
 
       const plan = await buildPlan(
-        source, cfg, env, target, adapter, sha, sshKey, cfg.health, registryToken,
+        source, cfg, env, target, adapter, sha, sshKey, cfg.health, registryToken, registryUser,
         selectedStages(stages, DEPLOY_STAGES),
       )
         r.set("plan", plan)

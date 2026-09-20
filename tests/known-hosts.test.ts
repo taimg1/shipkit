@@ -13,6 +13,7 @@ import {
   knownHostsName,
   parseKnownHosts,
   hashKnownHosts,
+  sshHostKeyRefusal,
 } from "../.dagger/src/core/known-hosts.ts"
 
 // dev-server's committed host key, so the fixture's pin and the key the server offers are the
@@ -140,4 +141,14 @@ test("the Kamal copy is hashed per name, and OpenSSH still finds the pinned key 
 test("a line naming several hosts becomes one hashed line per host", () => {
   const out = hashKnownHosts("a.example,b.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINzSeby1W18fIv7pys7p0Pe4xiOEGK65dXpurYBTf5d1")
   assert.equal(out.trim().split("\n").length, 2)
+})
+
+test("ssh's own refusals are recognised, and unrelated failures are left alone", () => {
+  assert.match(sshHostKeyRefusal("Host key verification failed.\n") ?? "", /not the one pinned/)
+  assert.match(
+    sshHostKeyRefusal("@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@") ?? "",
+    /different host key/,
+  )
+  assert.equal(sshHostKeyRefusal("ssh: connect to host x port 22: Connection refused"), null)
+  assert.equal(sshHostKeyRefusal(""), null)
 })

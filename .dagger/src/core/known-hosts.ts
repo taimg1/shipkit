@@ -173,6 +173,26 @@ export function hashKnownHosts(text: string, salt: () => Buffer = () => randomBy
   return lines.join("\n") + "\n"
 }
 
+/**
+ * Why ssh refused the server's key, or null when the output is about something else.
+ *
+ * Without this the deploy stops at "exit code: 255", which reads as a network problem. The
+ * cause is either a hostKey that does not match the server or a server that is not the one
+ * pinned — and those need opposite reactions, so the message has to say which.
+ */
+export function sshHostKeyRefusal(output: string): string | null {
+  if (/REMOTE HOST IDENTIFICATION HAS CHANGED/i.test(output)) {
+    return "the server presented a different host key than the one pinned in shipkit.yaml"
+  }
+  if (/Host key verification failed/i.test(output)) {
+    return "ssh refused the server's host key: it is not the one pinned in shipkit.yaml"
+  }
+  if (/No (?:ED25519|ECDSA|RSA) host key is known|not match the host key|Offending .*key/i.test(output)) {
+    return "ssh refused the server's host key: it is not the one pinned in shipkit.yaml"
+  }
+  return null
+}
+
 /** The doctor line for one environment's pinned host key. */
 export function checkHostKey(envName: string, env: { host?: string; sshPort: number; hostKey?: string }): string {
   if (!env.host) return `ok (${envName}: no host yet)`

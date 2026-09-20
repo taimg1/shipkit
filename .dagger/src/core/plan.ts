@@ -9,18 +9,29 @@ import { currentVersion } from "./release.js"
 import { lastApplied } from "./history.js"
 import { stripBom } from "./sql-scan.js"
 import { servingVersion as servingHealthVersion } from "./verify.js"
-import { EXIT, ShipkitError } from "../errors.js"
+import { EXIT, ShipkitError, configError } from "../errors.js"
 import { ServerState, parseServerProbe, provisioning, serverProbeScript } from "./server-probe.js"
 import { dockerPlatform, SUPPORTED_RIDS } from "./platform.js"
 import { remoteScript, sshContainer } from "./ssh.js"
+import { hostKeyHint, sshHostKeyRefusal } from "./known-hosts.js"
+import { execOutput } from "../report.js"
 import { imageTag as tagFor } from "./publish-gate.js"
 import { newestBackup } from "./backup.js"
 
 /** Asks the server what exists on it. An answer the kit cannot read stops the plan. */
 export async function probeServer(cfg: Config, env: Environment, key: Secret): Promise<ServerState> {
-  const out = await sshContainer(env, key)
-    .withExec(["sh", "-c", remoteScript(env, serverProbeScript(cfg.service, env.dbContainer))])
-    .stdout()
+  let out: string
+  try {
+    out = await sshContainer(env, key)
+      .withExec(["sh", "-c", remoteScript(env, serverProbeScript(cfg.service, env.dbContainer))])
+      .stdout()
+  } catch (err) {
+    // The first SSH of every deploy, so this is where a wrong pin surfaces. "exit code: 255"
+    // on its own reads as a network problem.
+    const refused = sshHostKeyRefusal(execOutput(err) ?? "")
+    if (refused) throw configError(refused, hostKeyHint(env.host ?? "<host>", env.sshPort))
+    throw err
+  }
   const probe = parseServerProbe(out)
   if (!probe.ok) {
     throw new ShipkitError(EXIT.INFRA, `cannot read the state of the server: ${probe.reason}`)

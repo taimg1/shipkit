@@ -155,6 +155,30 @@ test("deploy names who is running it, for the deploy lock (B13)", () => {
   assert.ok(!argsFor(["deploy", "--yes=abc"]).args.some((a: string) => a.startsWith("--actor")))
 })
 
+// A registry that requires a password checks the username too, and the username was the one
+// value nobody could set: GITHUB_ACTOR or the module's "shipkit" fallback. Pushing a real
+// image to a local registry:2 with htpasswd is what showed it — a correct token, 401, and a
+// hint that said to check the token (docs/runbooks/registry.md).
+test("the registry username can be named outside GitHub Actions", () => {
+  const env = { SHIPKIT_REGISTRY_TOKEN: "t", SHIPKIT_REGISTRY_USER: "shipkit-ci" }
+  const args = argsFor(["ci"], ctx({ env })).args
+  assert.ok(args.includes("--registry-token=env:SHIPKIT_REGISTRY_TOKEN"))
+  assert.ok(args.includes("--registry-user=shipkit-ci"))
+})
+
+test("SHIPKIT_REGISTRY_USER wins over GITHUB_ACTOR, which still works on Actions", () => {
+  const both = { SHIPKIT_REGISTRY_TOKEN: "t", SHIPKIT_REGISTRY_USER: "bot", GITHUB_ACTOR: "bob" }
+  assert.ok(argsFor(["ci"], ctx({ env: both })).args.includes("--registry-user=bot"))
+  const actor = { SHIPKIT_REGISTRY_TOKEN: "t", GITHUB_ACTOR: "bob" }
+  assert.ok(argsFor(["ci"], ctx({ env: actor })).args.includes("--registry-user=bob"))
+})
+
+test("a username without a token is not passed: there is nothing to send it with", () => {
+  const args = argsFor(["ci"], ctx({ env: { SHIPKIT_REGISTRY_USER: "shipkit-ci" } })).args
+  assert.ok(!args.some((a: string) => a.startsWith("--registry-user")))
+  assert.ok(!args.some((a: string) => a.startsWith("--registry-token")))
+})
+
 test("a flag never swallows the command after it", () => {
   const opts = parseArgs(["--json", "ci"])
   assert.equal(opts.json, true)

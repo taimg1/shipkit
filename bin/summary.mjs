@@ -14,6 +14,17 @@
 /** Pipeline order, so the table reads top to bottom regardless of which job finished first. */
 export const CI_STAGE_ORDER = ["pre", "build", "test", "db", "push"]
 
+/** The deploy's own order (ADR 0004). A deploy report is rendered by this same file. */
+export const DEPLOY_STAGE_ORDER = ["provision", "backup", "migrate", "release", "verify", "rollback", "clean"]
+
+/** The module's exit code for "this needs a person": a stop, not a failure. */
+const CONFIRM = 4
+
+/** Which pipeline these reports came from. `deploy --plan` counts as a deploy. */
+const isDeploy = (reports) => reports.some((r) => /^deploy\b/.test(String(r.command ?? "")))
+
+const orderFor = (reports) => (isDeploy(reports) ? DEPLOY_STAGE_ORDER : CI_STAGE_ORDER)
+
 /**
  * How much an entry for the same stage is worth when several reports mention it.
  *
@@ -37,8 +48,9 @@ export function mergeStages(reports) {
     }
   }
 
-  const known = CI_STAGE_ORDER.filter((name) => best.has(name))
-  const extra = [...best.keys()].filter((name) => !CI_STAGE_ORDER.includes(name))
+  const order = orderFor(reports)
+  const known = order.filter((name) => best.has(name))
+  const extra = [...best.keys()].filter((name) => !order.includes(name))
   return [...known, ...extra].map((name) => best.get(name))
 }
 
@@ -52,6 +64,27 @@ function detail(stage) {
   if (Array.isArray(stage.pending) && stage.pending.length) parts.push(`${stage.pending.length} pending`)
   if (stage.base !== undefined) parts.push(`base \`${escapeCell(stage.base)}\``)
   if (stage.published) parts.push(`\`${stage.published}\``)
+
+  // Deploy stages. A tick against `backup` or `release` says a stage ran; what the reader of a
+  // deploy needs is what it did to production — which version is serving, where the dump that
+  // could undo it is kept, and whether a rollback fired.
+  if (Array.isArray(stage.provisioned) && stage.provisioned.length) {
+    parts.push(escapeCell(stage.provisioned.join("; ")))
+  }
+  if (stage.backup?.path) parts.push(`stored \`${escapeCell(stage.backup.path)}\``)
+  else if (stage.backup?.status === "empty-database") parts.push("empty database, nothing to dump")
+  if (Array.isArray(stage.applied)) {
+    parts.push(stage.applied.length ? `applied ${escapeCell(stage.applied.join(", "))}` : "nothing pending")
+  }
+  if (stage.released) {
+    parts.push(`\`${escapeCell(stage.released)}\`${stage.previous ? ` (was \`${escapeCell(stage.previous)}\`)` : ""}`)
+  }
+  if (stage.rolledBackTo) parts.push(`rolled back to \`${escapeCell(stage.rolledBackTo)}\``)
+  if (stage.verified?.version) parts.push(`/health \`${escapeCell(stage.verified.version)}\``)
+  if (Array.isArray(stage.rollbackWindow)) {
+    parts.push(`${stage.rollbackWindow.length} version(s) left to roll back to`)
+  }
+
   if (stage.status !== "ok" && stage.reason) parts.push(escapeCell(stage.reason))
   return parts.join(" · ") || ""
 }
@@ -129,6 +162,37 @@ export function parseJobResults(text) {
   }
 }
 
+/**
+ * What an unattended deploy left for the person it stopped for.
+ *
+ * `deploy --auto` exits 4 when the plan is not one it may approve on its own. The run is red
+ * and the plan is in a log nobody will open, so the summary carries the plan itself and the
+ * one command that executes it — otherwise "confirmation required" is a dead end.
+ */
+function confirmationLines(reports) {
+  const stopped = reports.find((r) => r.exitCode === CONFIRM)
+  if (!stopped) return []
+
+  const lines = ["", "### Confirmation required", "", escapeCell(stopped.error ?? "this deploy needs a person")]
+  if (stopped.rendered) lines.push("", "```", ...String(stopped.rendered).split("\n"), "```")
+  const token = stopped.plan?.token
+  const stage = Array.isArray(stopped.plan?.stages) ? ` --stage=${stopped.plan.stages.join(",")}` : ""
+  lines.push(
+    "",
+    token
+      ? "Read the plan above. If it is what should happen, run it from a checkout of this commit:"
+      : "Read the plan, then confirm it from a checkout of this commit:",
+    "",
+    "```",
+    token ? `shipkit deploy --yes=${token}${stage}` : "shipkit deploy --plan   # then: shipkit deploy --yes=<token>",
+    "```",
+    "",
+    "The token is a hash of the plan: if production moves in the meantime it stops matching, " +
+      "and `--plan` has to be read again. It proves the plan was displayed, never that anyone agreed to it.",
+  )
+  return lines
+}
+
 function jobLines(bad) {
   if (bad.length === 0) return []
   return ["", `**Jobs that did not succeed:** ${bad.map((j) => `\`${escapeCell(j.name)}\` (${j.result})`).join(", ")}`]
@@ -151,15 +215,30 @@ export function renderSummary(reports, { title = "CI", jobs } = {}) {
   }
 
   const stages = mergeStages(reports)
-  const failed = reports.some((r) => r.ok === false) || bad.length > 0
+  // A deploy that stopped for confirmation did not fail: nothing is wrong, and nothing was
+  // deployed. Saying "failed" sends the reader looking for a broken thing. A real failure
+  // anywhere still outranks it — "stopped" must never cover for one.
+  const broken = reports.some((r) => r.ok === false && r.exitCode !== CONFIRM) || bad.length > 0
+  const stopped = reports.some((r) => r.exitCode === CONFIRM)
   const sha = reports.find((r) => r.sha && r.sha !== "dev")?.sha
   const seconds = reports.reduce((total, r) => total + (r.seconds ?? 0), 0)
   const dirty = reports.some((r) => r.dirty)
 
+  // What a deploy did to production, above the table: the target it changed and the version
+  // that is serving because of this run.
+  const target = reports.find((r) => r.plan)?.plan
+  const released = stages.find((s) => s.name === "release" && s.status === "ok")?.released
+  const subtitle = [
+    sha ? `Commit \`${sha.slice(0, 7)}\`` : "",
+    target ? `${target.env} (${escapeCell(target.url)})` : "",
+    released ? `deployed \`${escapeCell(released)}\`` : "",
+    `${Math.round(seconds)}s of stage time`,
+  ].filter(Boolean)
+
   const lines = [
-    `## ${title} — ${failed ? "failed" : "ok"}`,
+    `## ${title} — ${broken ? "failed" : stopped ? "stopped" : "ok"}`,
     "",
-    sha ? `Commit \`${sha.slice(0, 7)}\` · ${Math.round(seconds)}s of stage time` : `${Math.round(seconds)}s of stage time`,
+    subtitle.join(" · "),
     "",
     "| | stage | time | detail |",
     "|:-:|---|---:|---|",
@@ -175,6 +254,7 @@ export function renderSummary(reports, { title = "CI", jobs } = {}) {
   }
 
   lines.push(...jobLines(bad))
+  lines.push(...confirmationLines(reports))
   lines.push(...failureDetails(stages))
 
   const error = reports.find((r) => r.ok === false)

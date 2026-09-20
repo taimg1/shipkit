@@ -12,8 +12,12 @@ verify, roll back.
 | Trigger | starts the pipeline | GitHub Actions (thin wrapper) |
 | Delivery | artifact → server | Kamal |
 
-The workflow YAML contains a checkout and one call. Nothing else. That is what keeps
+Each job in the workflow YAML is a checkout and one call. Nothing else. That is what keeps
 the pipeline portable to Woodpecker, Gitea Actions or GitLab CI.
+
+One workflow: a `deploy` job that `needs` the `ci` job and runs only on a push to the default
+branch, so the image it releases is the one that run published. `templates/github/ci.yml` is
+what a client repository copies.
 
 ## Pipelines
 
@@ -21,6 +25,10 @@ the pipeline portable to Woodpecker, Gitea Actions or GitLab CI.
 - `dagger call deploy` — `backup` → `migrate` → `release` → `verify` → `rollback` → `clean`.
   Without `--yes` it prints target, image version, pending migrations and the SQL diff,
   then waits for confirmation.
+- A merge to the default branch deploys itself: the pipeline runs `shipkit deploy --auto`, which
+  self-approves only a plan with no destructive SQL, no declared data loss and nothing to
+  provision. Anything else stops with exit 4 — nothing touched, the plan and its token in the
+  run summary for a person to confirm. `docs/runbooks/deploy.md`.
 
 ## Runbooks
 

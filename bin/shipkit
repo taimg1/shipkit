@@ -23,6 +23,7 @@ import {
   backupOut,
   collectBackup,
   commandKey,
+  executesDeploy,
   expandSecretsFile,
   isDirty,
   namesModule,
@@ -46,6 +47,8 @@ shipkit — CI/CD for turnkey client projects
   shipkit deploy --plan              what would happen; changes nothing
   shipkit deploy --yes=<token>       execute exactly that plan
                                      backup -> migrate -> release -> verify -> rollback -> clean
+  shipkit deploy --auto              deploy without a person, when the plan is safe to:
+                                     the module runs it or exits 4 with the plan and its token
   shipkit backup [--out <path>]      a dump proven restorable, stored on the server
                                      and written here with mode 0600
   shipkit rollback <sha>
@@ -67,6 +70,8 @@ Options (an option a command does not take is an error, never ignored)
 
 Options for deploy
   --ssh-key <path>  private key for the target (or SHIPKIT_SSH_KEY)
+  --auto            let the module approve the plan itself when nothing about it needs a
+                    person. Exactly one of --plan, --yes and --auto; together they are an error
 
 Environment
   SHIPKIT_REGISTRY_TOKEN   registry credential
@@ -357,8 +362,9 @@ async function main() {
   }
 
   // A deploy builds its migration bundle from the working tree while releasing the image of a
-  // commit. With uncommitted changes the two would be different code (#6).
-  if (key === "deploy" && typeof opts.yes === "string" && workingTreeDirty()) {
+  // commit. With uncommitted changes the two would be different code (#6). True of an
+  // unattended deploy as much as a confirmed one — more so, since nobody is reading the warning.
+  if (executesDeploy(key, opts) && workingTreeDirty()) {
     fail(
       EXIT.CONFIG,
       "refusing to deploy from a working tree with uncommitted changes\n" +
@@ -374,7 +380,7 @@ async function main() {
   // rollback runs Kamal too, and a rollback with empty secrets boots the old image with an
   // empty connection string: /health answers, the application reaches nothing. Seen on
   // dev-server — the readiness check is what caught it.
-  if ((key === "deploy" && typeof opts.yes === "string") || key === "rollback") {
+  if (executesDeploy(key, opts) || key === "rollback") {
     const secretsPath = join(".kamal", "secrets")
     if (existsSync(secretsPath)) {
       const resolved = expandSecretsFile(readFileSync(secretsPath, "utf8"), process.env)

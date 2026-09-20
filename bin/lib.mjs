@@ -65,7 +65,7 @@ export const COMMAND_OPTIONS = {
   ci: { stage: "value", branch: "value", "migration-base": "value" },
   "db lint": { "migration-base": "value" },
   "db pending": { "migration-base": "value" },
-  deploy: { env: "value", plan: "flag", yes: "value", stage: "value", "ssh-key": "value" },
+  deploy: { env: "value", plan: "flag", yes: "value", auto: "flag", stage: "value", "ssh-key": "value" },
   backup: { env: "value", out: "value", "ssh-key": "value" },
   rollback: { env: "value", "ssh-key": "value" },
   doctor: {},
@@ -118,6 +118,23 @@ export function commandKey(positionals) {
  * Returns undefined when everything is accepted, otherwise `{ code, message }`.
  */
 export function validateOptions(key, opts) {
+  // --plan, --yes and --auto are three different answers to the same question, and letting one
+  // of them win silently means the other was ignored — where one of them is "deploy this
+  // without showing it to anyone". Checked before the loop below, so the combination is
+  // reported as the combination rather than as whatever option happened to be parsed first.
+  if (key === "deploy" && opts.auto !== undefined) {
+    const other = opts.yes !== undefined ? "--yes" : opts.plan !== undefined ? "--plan" : undefined
+    if (other) {
+      return {
+        code: EXIT.CONFIG,
+        message:
+          `--auto and ${other} cannot be given together\n` +
+          "  --auto lets the deploy approve itself when the plan is safe; " +
+          `${other === "--yes" ? "--yes confirms a plan a person has seen" : "--plan changes nothing"}`,
+      }
+    }
+  }
+
   const allowed = { ...GLOBAL_OPTIONS, ...(COMMAND_OPTIONS[key] ?? {}) }
   for (const [name, value] of Object.entries(opts)) {
     if (name === "_" || name === "raw") continue
@@ -143,6 +160,17 @@ export function validateOptions(key, opts) {
     }
   }
   return undefined
+}
+
+/**
+ * Whether this invocation would change production: `deploy --yes=<token>` or `deploy --auto`.
+ *
+ * The guards that run before the module — the dirty working tree, the resolved Kamal secrets —
+ * apply to both. They used to test for `--yes` alone, so adding a second way to execute a
+ * deploy would have walked straight past them.
+ */
+export function executesDeploy(key, opts) {
+  return key === "deploy" && (typeof opts.yes === "string" || opts.auto === true)
 }
 
 /**
@@ -357,18 +385,21 @@ export function translate(key, opts, ctx) {
       // deploy will be given.
       const stage = opts.stage ? [`--stage=${opts.stage}`] : []
       if (opts.plan) return ["deploy-plan", ...target, ...credentials(opts, ctx.env), ...stage]
-      if (typeof opts.yes === "string") {
-        // Recorded in the server-side deploy lock, so a refused deploy can say who holds it.
-        const actor = ctx.env.GITHUB_ACTOR || ctx.env.USER || ctx.env.USERNAME
-        return [
-          "deploy",
-          ...target,
-          ...credentials(opts, ctx.env, { dbUrl: true }),
-          `--plan-token=${opts.yes}`,
-          ...stage,
-          ...(actor ? [`--actor=${actor}`] : []),
-        ]
-      }
+      // Recorded in the server-side deploy lock, so a refused deploy can say who holds it.
+      const actor = ctx.env.GITHUB_ACTOR || ctx.env.USER || ctx.env.USERNAME
+      const execute = (approval) => [
+        "deploy",
+        ...target,
+        ...credentials(opts, ctx.env, { dbUrl: true }),
+        approval,
+        ...stage,
+        ...(actor ? [`--actor=${actor}`] : []),
+      ]
+      // The module decides whether this plan may approve itself, and refuses with exit 4 and the
+      // plan when it may not. The wrapper only says that nobody is waiting at a terminal — it
+      // cannot be the thing that judges a plan safe (ADR 0009).
+      if (opts.auto === true) return execute("--auto-approve=true")
+      if (typeof opts.yes === "string") return execute(`--plan-token=${opts.yes}`)
       return null
     }
     // #11: this case existed and called a module function that did not. The command was

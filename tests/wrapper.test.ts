@@ -2,6 +2,7 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import {
   commandKey,
+  executesDeploy,
   expandSecretsFile,
   isDirty,
   newestMigrationId,
@@ -145,6 +146,59 @@ test("deploy --plan is built for the same --stage the deploy will run (B7)", () 
   const run = argsFor(["deploy", "--yes=abc", "--stage=backup,migrate"]).args
   assert.ok(run.includes("--stage=backup,migrate"))
   assert.ok(!argsFor(["deploy", "--plan"]).args.some((a: string) => a.startsWith("--stage")))
+})
+
+// --- the unattended path (--auto) ---
+
+test("deploy --auto asks the module to approve the plan, and carries no token", () => {
+  // The wrapper cannot judge a plan safe: it says only that nobody is waiting at a terminal.
+  // The module decides, and refuses with exit 4 when the plan is not one it may self-approve.
+  const args = argsFor(["deploy", "--auto"]).args
+  assert.equal(args[0], "deploy")
+  assert.ok(args.includes("--auto-approve=true"))
+  assert.ok(!args.some((a: string) => a.startsWith("--plan-token")))
+})
+
+test("an automatic deploy is given everything a confirmed one is", () => {
+  // Same credentials, same actor. A deploy that migrates without --db-url fails at the
+  // migrate stage, with the backup already taken.
+  const env = { SHIPKIT_SSH_KEY: "/k", SHIPKIT_DATABASE_URL: "x", SHIPKIT_KAMAL_SECRETS: "A=1", GITHUB_ACTOR: "bot" }
+  const auto = argsFor(["deploy", "--auto"], ctx({ env })).args
+  const confirmed = argsFor(["deploy", "--yes=abc"], ctx({ env })).args
+  const credentials = (a: string[]) => a.filter((x) => /^--(ssh-key|db-url|registry-token|kamal-secrets|actor)=/.test(x))
+  assert.deepEqual(credentials(auto), credentials(confirmed))
+  assert.ok(auto.includes("--actor=bot"))
+})
+
+test("--auto is built for the stages it will run, like --yes (B7)", () => {
+  assert.ok(argsFor(["deploy", "--auto", "--stage=backup,migrate"]).args.includes("--stage=backup,migrate"))
+})
+
+test("--auto and --yes together is an error, not a silent precedence", () => {
+  // Two different answers to "who approved this". Whichever won silently, the other was
+  // ignored — and one of them means "nobody looked at it".
+  const both = argsFor(["deploy", "--auto", "--yes=abc"])
+  assert.equal(both.invalid?.code, 2)
+  assert.match(both.invalid!.message, /--auto and --yes/)
+  // Either order, and the same for --plan: a plan changes nothing, --auto changes production.
+  assert.equal(argsFor(["deploy", "--yes=abc", "--auto"]).invalid?.code, 2)
+  assert.match(argsFor(["deploy", "--auto", "--plan"]).invalid!.message, /--auto and --plan/)
+})
+
+test("--auto takes no value", () => {
+  const { invalid } = argsFor(["deploy", "--auto=true"])
+  assert.equal(invalid?.code, 2)
+  assert.match(invalid!.message, /--auto takes no value/)
+})
+
+test("both ways of executing a deploy are guarded before the module is called", () => {
+  // The dirty-tree refusal and the resolved Kamal secrets hang off this predicate. It used to
+  // be "--yes is a string" spelled out twice, which --auto would have walked straight past.
+  assert.equal(executesDeploy("deploy", { yes: "abc" }), true)
+  assert.equal(executesDeploy("deploy", { auto: true }), true)
+  assert.equal(executesDeploy("deploy", { plan: true }), false)
+  assert.equal(executesDeploy("deploy", {}), false)
+  assert.equal(executesDeploy("ci", { auto: true }), false)
 })
 
 test("deploy names who is running it, for the deploy lock (B13)", () => {

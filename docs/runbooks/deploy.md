@@ -57,11 +57,16 @@ with nothing to apply.
 ## The automatic path
 
 A merge to the default branch deploys itself. The `deploy` job in `.github/workflows/ci.yml`
-(`templates/github/ci.yml` in the kit) `needs` the `ci` job, so it runs on the same commit, in
-the same run, after the job that published the image — what it releases is by construction what
-this run built. It calls `shipkit deploy --auto`, and one deploy runs at a time: the job's
-concurrency group holds the next merge until this one is finished, and never cancels a deploy
-in flight.
+(`templates/github/ci.yml` in the kit, `ci-no-db.yml` for a project with no database) `needs`
+the `Image` job, which in turn needs the three checks — so it runs on the same commit, in the
+same run, after the job that published the image, and what it releases is by construction what
+this run built. It runs on a push to the default branch and nothing else: never on a pull
+request, never on a tag.
+
+It calls `shipkit deploy --auto`, and one deploy runs at a time: the job's concurrency group
+holds the next merge until this one has finished, and `cancel-in-progress` is `false` — a
+deploy cancelled between `migrate` and `verify` would leave production on a schema nothing had
+verified, which is the one state this pipeline exists to avoid.
 
 `--auto` does not approve anything. It says that nobody is waiting at a terminal; the module
 decides, and it self-approves only a plan where **all** of these hold:
@@ -73,10 +78,77 @@ decides, and it self-approves only a plan where **all** of these hold:
   boots the database, is a change to the machine, confirmed like one;
 - the image for this commit is published, which is the same gate a confirmed deploy passes.
 
-Everything else stops: exit 4, nothing on the server touched, and the job red. A red job is
-the point — a merge that did not reach production must not look like one that did. The run's
-step summary carries the plan, the reason, and the token; `report-deploy` in the run's
-artifacts has the full report.
+Everything else stops: exit 4, nothing on the server touched, and the job red.
+
+Exit 4 is not a failure of the pipeline — it is the kit stopping for a person — and the run
+says so everywhere except in the colour of the box. The job summary is titled **stopped**, not
+failed, and carries the reason, the plan as `--plan` would print it, and the exact
+`shipkit deploy --yes=<token>` command; the run carries a `Deploy stopped` warning annotation;
+the deployment is recorded as `inactive`, never `success`. The box itself is red because
+GitHub Actions cannot give a job a neutral conclusion — the only way to get one is to publish a
+second check run beside the real one, saying something different about the same work — and
+because a green box is worse: a merge that did not reach production must not look like one
+that did, and green is what people stop reading.
+
+`report-deploy` in the run's artifacts has the full report.
+
+### What the run records
+
+The job writes a GitHub deployment for the environment named in `environments:` in
+`shipkit.yaml`, with that environment's `url`. Its state comes from the report the deploy
+wrote and from nothing else:
+
+| Report | Deployment state |
+|---|---|
+| released and `verify` passed | `success`, with `environment_url` |
+| `verify` failed and the release was rolled back | `failure`, naming the version it rolled back to |
+| any gate, configuration or infrastructure failure | `failure`, naming the stage and the reason |
+| exit 4 — stopped for confirmation | `inactive` |
+| no readable report at all | `failure` |
+
+It is never derived from whether the job reached its last step. A deployment marked `success`
+while `verify` failed and the release was rolled back is worse than no record at all: that
+record is what someone reads during an incident to find out what is serving.
+
+The mapping is `bin/deployment.mjs` in the kit — the wrapper, where output formatting belongs
+(ADR 0009). The Dagger module knows nothing about GitHub, so a client on GitLab or Gitea
+rewrites the workflow and keeps the pipeline. `shipkit summary <dir> --deployment-status <dir>`
+is the command; it writes the two request bodies the workflow posts with `gh api`.
+
+The job deliberately does not use Actions' own `environment:` key. That creates a deployment
+whose status follows the job's outcome, which is exactly the thing that must not decide it.
+
+### Before you turn the deploy job on
+
+The repository owner has to do four things, and the fourth is not optional.
+
+1. **Repository secrets.** `SHIPKIT_SSH_KEY` — the private half of the key whose public half is
+   in the deploy user's `authorized_keys` on the server. `SHIPKIT_DATABASE_URL` — the
+   production connection string, for a project that has a database; only the `migrate` stage
+   opens it, and only when something is actually pending, so a release with nothing to apply
+   never asks for it. And one secret per variable your `.kamal/secrets` refers to: that file
+   holds `NAME=$NAME` references, and a reference with nothing behind it stops the deploy
+   before the server is touched, naming every variable it could not resolve. The workflow
+   carries the example names commented out — replace them with yours.
+   The registry credential is `secrets.GITHUB_TOKEN`, which the job already has: it covers
+   ghcr.io for this repository's own packages. Any other registry needs a read-only token of
+   your own in `SHIPKIT_REGISTRY_TOKEN`.
+2. **The runner must reach the server over SSH.** GitHub-hosted runners come from a range of
+   addresses that changes; if the server's firewall only admits known addresses, this job will
+   not get in, and the failure will look like an infrastructure error rather than a firewall.
+   Either allow GitHub's published ranges for the SSH port, or use a self-hosted runner on a
+   network that already reaches the server. The host key is pinned in `shipkit.yaml`
+   (`hostKey:`), so a server presenting anything else is refused — see
+   `docs/runbooks/server-bootstrap.md`.
+3. **The environment.** `environments:` in `shipkit.yaml` needs `url`, `host`, `sshUser` and
+   `hostKey` for the target this job deploys to. `shipkit doctor` says which are missing.
+4. **Run the first deploy by hand.** `--auto` refuses a first deploy anyway — there is nothing
+   deployed for a failed `verify` to roll back to, and provisioning the server is a change to
+   the machine — so the first release is `shipkit deploy --plan`, read it, then
+   `shipkit deploy --yes=<token>` from a checkout. Do that before the job is ever allowed to
+   run: it is where a wrong `hostKey`, a missing secret and an unreachable server all surface,
+   and finding them from a terminal costs a minute each. Finding them from a workflow run
+   costs a round trip each.
 
 The ordinary gates are unchanged and are *not* confirmation questions: a backup that cannot be
 verified, a migration that fails, a `verify` that does not see the new SHA — those fail the
@@ -185,6 +257,12 @@ Never remove Kamal's `~/.kamal/lock-<service>` this way; that one is `kamal lock
 | 2 | Configuration | `shipkit doctor` |
 | 3 | Infrastructure | The engine, the server, or the registry — retry after fixing |
 | 4 | Needs confirmation | Run `--plan`, read it, then `--yes=<token>`. From the automatic path: "Confirming a deploy that stopped" above |
+
+The deploy job has two more ways to go red, and neither of them means production moved. The
+first step fails when `SHIPKIT_SSH_KEY` is empty — there is no key to reach the server with,
+and nothing has been attempted. The last step fails when the deployment could not be recorded:
+the deploy itself has already happened or already failed, and what is missing is the record of
+it. Read the step that failed before reading the colour of the job.
 
 **`Host key verification failed`** (or net-ssh's `HostKeyMismatch` from Kamal) means the
 server presented a key other than the one pinned as `hostKey` in `shipkit.yaml`. Treat it as a

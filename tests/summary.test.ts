@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { CI_STAGE_ORDER, mergeStages, renderSummary } from "../bin/summary.mjs"
+import { CI_STAGE_ORDER, DEPLOY_STAGE_ORDER, mergeStages, parseJobResults, renderSummary, unsuccessfulJobs } from "../bin/summary.mjs"
 
 /** What one job's report looks like: its own stage ran, the rest are placeholders. */
 const jobReport = (name: string, stage: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
@@ -86,4 +86,160 @@ test("a dirty tree is called out, because its image is never published", () => {
 
 test("the title names the pipeline, so deploy and ci summaries are told apart", () => {
   assert.match(renderSummary([jobReport("pre", {})], { title: "Deploy" }), /^## Deploy — ok/)
+})
+
+// --- job results (D-10) ---
+
+const needs = (results: Record<string, string>) =>
+  Object.fromEntries(Object.entries(results).map(([name, result]) => [name, { result, outputs: {} }]))
+
+// The bug: `unit` writes no report. With only unit tests failing, every report said ok and the
+// summary of a red workflow was headed "CI — ok".
+test("a job that failed without a report fails the verdict", () => {
+  const jobs = needs({ unit: "failure", analysis: "success", tests: "success", migrations: "success", image: "skipped" })
+  const out = renderSummary([jobReport("pre", {}), jobReport("test", {})], { jobs })
+  assert.match(out, /^## CI — failed/)
+  assert.match(out, /`unit` \(failure\)/)
+})
+
+test("a cancelled job is not a pass either", () => {
+  const out = renderSummary([jobReport("pre", {})], { jobs: needs({ unit: "success", tests: "cancelled" }) })
+  assert.match(out, /^## CI — failed/)
+  assert.match(out, /`tests` \(cancelled\)/)
+})
+
+test("all jobs succeeded and all reports ok is ok", () => {
+  const out = renderSummary([jobReport("pre", {})], { jobs: needs({ unit: "success", analysis: "success" }) })
+  assert.match(out, /^## CI — ok/)
+  assert.doesNotMatch(out, /did not succeed/)
+})
+
+test("a skipped job on its own does not fail the verdict", () => {
+  assert.deepEqual(unsuccessfulJobs(needs({ image: "skipped", unit: "success" })), [])
+})
+
+test("no reports and a failed job says failed, and which job", () => {
+  const out = renderSummary([], { jobs: needs({ unit: "failure" }) })
+  assert.match(out, /^## CI — failed/)
+  assert.match(out, /`unit` \(failure\)/)
+})
+
+// Asked for and unreadable is not the same as not asked for.
+test("job results that cannot be read fail the verdict", () => {
+  assert.equal(parseJobResults("not json"), null)
+  assert.equal(parseJobResults("[]"), null)
+  assert.match(renderSummary([jobReport("pre", {})], { jobs: null }), /^## CI — failed/)
+})
+
+test("job results read from GitHub's toJSON(needs)", () => {
+  const text = JSON.stringify(needs({ unit: "failure", tests: "success" }), null, 2)
+  assert.deepEqual(unsuccessfulJobs(parseJobResults(text)), [{ name: "unit", result: "failure" }])
+})
+
+test("without job results the verdict is what the reports say, as before", () => {
+  assert.match(renderSummary([jobReport("pre", {})]), /^## CI — ok/)
+})
+
+// --- deploy reports (the unattended path) ---
+
+/**
+ * A finished deploy, as the module writes it: one report, its stages in pipeline order, with
+ * the detail each stage carries on its entry.
+ */
+const deployReport = (stages: Record<string, unknown>[], extra: Record<string, unknown> = {}) => ({
+  command: "deploy",
+  sha: "f6917afc0de1234567890abcdef1234567890abc",
+  ok: true,
+  exitCode: 0,
+  seconds: 210,
+  stages,
+  plan: { env: "prod", url: "https://api.client.com", imageTag: "sha-f6917af", token: "7f3a91c2e004" },
+  ...extra,
+})
+
+const deployed = [
+  { name: "provision", status: "skipped", reason: "server already provisioned" },
+  { name: "backup", status: "ok", seconds: 41, backup: { status: "verified", path: "/var/backups/shipkit/api/f6917af-20260920T101500Z.pgc" } },
+  { name: "migrate", status: "ok", seconds: 6, applied: ["20260918_AddOrdersIndex"] },
+  { name: "release", status: "ok", seconds: 38, released: "sha-f6917af", previous: "sha-9f8e7d6" },
+  { name: "verify", status: "ok", seconds: 9, verified: { version: "f6917afc0de1", attempts: 2 } },
+  { name: "rollback", status: "skipped", reason: "not needed" },
+  { name: "clean", status: "ok", seconds: 4, rollbackWindow: ["sha-9f8e7d6", "sha-1122334"] },
+]
+
+test("a deploy's stages are listed in deploy order, not in ci order", () => {
+  const shuffled = [...deployed].reverse()
+  const merged = mergeStages([deployReport(shuffled)])
+  assert.deepEqual(merged.map((s: { name: string }) => s.name), DEPLOY_STAGE_ORDER)
+})
+
+// What a deploy did to production is not visible from a stage name and a tick: where the dump
+// that could undo it is kept, which version is serving, and whether a rollback fired.
+test("the deploy table says where the backup is, and what is serving", () => {
+  const out = renderSummary([deployReport(deployed)], { title: "Deploy" })
+  assert.match(out, /^## Deploy — ok/)
+  assert.match(out, /prod \(https:\/\/api\.client\.com\)/)
+  assert.match(out, /deployed `sha-f6917af`/)
+  assert.match(out, /stored `\/var\/backups\/shipkit\/api\/f6917af-20260920T101500Z\.pgc`/)
+  assert.match(out, /applied 20260918_AddOrdersIndex/)
+  assert.match(out, /`sha-f6917af` \(was `sha-9f8e7d6`\)/)
+  assert.match(out, /2 version\(s\) left to roll back to/)
+})
+
+test("a rollback that fired is on the table, not only in the log", () => {
+  const rolledBack = deployed.map((s) =>
+    s.name === "verify"
+      ? { name: "verify", status: "failed", reason: "sha-9f8e7d6 is still answering /health" }
+      : s.name === "rollback"
+        ? { name: "rollback", status: "ok", seconds: 30, rolledBackTo: "sha-9f8e7d6", verified: { version: "9f8e7d6" } }
+        : s,
+  )
+  const out = renderSummary([deployReport(rolledBack, { ok: false, exitCode: 1, error: "the release did not take" })], {
+    title: "Deploy",
+  })
+  assert.match(out, /^## Deploy — failed/)
+  assert.match(out, /rolled back to `sha-9f8e7d6`/)
+})
+
+// --- stopped for confirmation (exit 4) ---
+
+const stoppedReport = () =>
+  deployReport(
+    [
+      { name: "provision", status: "skipped", reason: "not selected" },
+      { name: "backup", status: "skipped", reason: "previous stage failed" },
+    ],
+    {
+      ok: false,
+      exitCode: 4,
+      error: "this plan drops a column, which no pipeline may approve on its own",
+      rendered: "  target      prod  (https://api.client.com)\n  migrations  20260919_DropLegacy",
+    },
+  )
+
+test("a deploy that stopped for a person is stopped, not failed", () => {
+  // Nothing is broken and nothing was deployed. "failed" sends the reader looking for a fault.
+  const out = renderSummary([stoppedReport()], { title: "Deploy" })
+  assert.match(out, /^## Deploy — stopped/)
+  assert.match(out, /Confirmation required/)
+})
+
+test("the summary carries the plan and the exact command that executes it", () => {
+  // Exit 4 with the plan in a log nobody opens is a dead end: the run is red and the next step
+  // is unknowable from the run page.
+  const out = renderSummary([stoppedReport()], { title: "Deploy" })
+  assert.match(out, /drops a column/)
+  assert.match(out, /20260919_DropLegacy/)
+  assert.match(out, /shipkit deploy --yes=7f3a91c2e004/)
+})
+
+test("a real failure outranks a stop, so one cannot hide the other", () => {
+  const out = renderSummary([stoppedReport()], { title: "Deploy", jobs: { ci: { result: "failure" } } })
+  assert.match(out, /^## Deploy — failed/)
+})
+
+test("a plan confirmed for some stages is confirmed with those stages", () => {
+  const partial = stoppedReport()
+  partial.plan = { ...partial.plan, stages: ["backup", "migrate"] }
+  assert.match(renderSummary([partial]), /shipkit deploy --yes=7f3a91c2e004 --stage=backup,migrate/)
 })

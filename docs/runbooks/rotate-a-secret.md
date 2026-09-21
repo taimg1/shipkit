@@ -10,10 +10,14 @@ first, and it rots silently.
 |---|---|---|
 | `SHIPKIT_REGISTRY_TOKEN` | `ci` push stage | CI secret store (`GITHUB_TOKEN` on GitHub Actions — nothing to rotate) |
 | `SHIPKIT_SSH_KEY` | every deploy stage | CI secret store; the public half in the server's `authorized_keys` |
-| `SHIPKIT_DATABASE_URL` | the migration bundle | CI secret store |
+| `SHIPKIT_DATABASE_URL` | the migration bundle, as the schema owner | CI secret store |
 | `KAMAL_REGISTRY_PASSWORD`, database passwords | Kamal, via `.kamal/secrets` | CI secret store |
+| the application's connection string (`ConnectionStrings__Default`) | the application, as a role with no DDL rights | CI secret store, via `.kamal/secrets` and `env.secret` |
 
 None of them are in the repository. `.kamal/secrets` names variables; it does not hold values.
+A connection string belongs under `env.secret` in `config/deploy.yml`, never `env.clear`: clear
+values are committed and shown by `docker inspect`. `fixtures/dotnet-api` is the example to
+copy — its only literal is a registry password for a registry with no authentication.
 
 ## Rotating the deploy key
 
@@ -39,16 +43,27 @@ ssh <user>@<host> 'nano ~/.ssh/authorized_keys'   # remove the old entry
 
 Delete the private key from your machine afterwards.
 
-## Rotating the database password
+## Rotating the database passwords
 
-The application and the migration bundle both hold it, so they change together:
+There are two roles, and they rotate separately: the owner, which only the migration bundle
+uses (`SHIPKIT_DATABASE_URL`), and `app`, which only the application uses (its connection
+string in `.kamal/secrets`). The fixture creates `app` on first boot; its README has the
+commands for a database that predates that.
 
-1. Change it in PostgreSQL: `ALTER ROLE <user> WITH PASSWORD '<new>';`
-2. Update `SHIPKIT_DATABASE_URL` in the CI store.
-3. Update the value Kamal injects into the application.
-4. Deploy. `verify` proves the application still reaches the database.
+1. Change it in PostgreSQL. `\password <role>` in an interactive `psql` prompts for it, so the
+   new password is not left in shell history or a process list.
+2. For the owner: update `SHIPKIT_DATABASE_URL` in the CI store, and `POSTGRES_PASSWORD` with
+   it — that one only takes effect when the data directory is first initialised, so changing it
+   alone changes nothing, but a stale copy is a wrong password waiting for the next restore. For
+   `app`: update the variable `.kamal/secrets` points `ConnectionStrings__Default` at.
+3. Deploy. `verify` requires a 200 from the readiness path (`ready:` in shipkit.yaml, e.g.
+   `/health/ready`) from the new release, so a release holding the wrong `app` password fails
+   the gate and is rolled back. It does **not** prove the password works for anything beyond the
+   query the readiness endpoint runs, and the rollback puts back a version that holds the
+   *old* value — which, after step 1, cannot connect either. The rollback's own verify says
+   so, and the run reports both failures: fix the value and deploy forward.
 
-Between steps 1 and 4 the running application has a stale password. Plan for the gap or
+Between steps 1 and 3 the running application has a stale password. Plan for the gap or
 create a second role, move to it, and drop the first.
 
 ## Afterwards

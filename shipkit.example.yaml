@@ -2,7 +2,11 @@
 # Missing file = the build fails with a message. There is no default — defaults hide
 # misconfiguration.
 
-kit: github.com/taimg1/shipkit@v1.0.0
+# The kit version: a full 40-character commit of github.com/taimg1/shipkit, never a tag or a
+# branch — those can be moved, and this line decides which code runs your pipeline and holds
+# your deploy key. templates/github/ci.yml refuses anything else. `git ls-remote
+# https://github.com/taimg1/shipkit <tag>` gives the commit a tag points to today.
+kit: github.com/taimg1/shipkit@REPLACE_WITH_40_CHAR_COMMIT
 
 # Must match `service:` in config/deploy.yml. Kamal refuses an image whose `service` label
 # does not match, and it only labels images it built itself — so the kit labels ours.
@@ -18,6 +22,10 @@ project: src/Api
 migrationsProject: src/Infrastructure
 
 dockerfile: Dockerfile
+# The repository only — the kit appends :sha-<commit>. Lowercase, even when the GitHub
+# organisation is not: a registry refuses a capital letter. It must name the same image as
+# `registry.server` + `image:` in config/deploy.yml, which is what the server pulls
+# (docs/runbooks/registry.md).
 registry: ghcr.io/taimg1/client-api
 
 # Only merges to this branch publish an image. A branch build that pushed would put
@@ -26,6 +34,8 @@ registry: ghcr.io/taimg1/client-api
 defaultBranch: main
 
 # Set to false for a project that never publishes an image (a fixture, a library).
+# true needs `packages: write` and SHIPKIT_REGISTRY_TOKEN in the ci workflow — both are in
+# templates/github/ci.yml; with false, delete them there.
 publish: true
 
 # /health must return {"status":"ok","version":"<sha>"}.
@@ -33,6 +43,38 @@ publish: true
 # a failed deploy that looks green.
 health: /health
 
+# How many verified pre-deploy dumps to keep on the server, in
+# /var/backups/shipkit/<service>/. Older ones are deleted after each new one is stored.
+# A positive integer; anything else is a config error.
+backupRetention: 10
+
+# Set on the connection the migration bundle opens (PGOPTIONS). They are why Squawk's
+# require-lock-timeout / require-statement-timeout rules can stay excluded. A PostgreSQL
+# duration with a unit; 0 (no timeout) is refused. These are the defaults.
+migrations:
+  lockTimeout: 5s
+  statementTimeout: 15min
+
+# Required unless db is "none": an endpoint that answers 200 only when the application can
+# reach its database. /health deliberately touches nothing, so on its own it passes a release
+# with a wrong connection string. verify requires both after every release and every rollback.
+ready: /health/ready
+
+# How long verify keeps retrying — unreachable, the previous version still answering, or not
+# ready yet — before the release is declared failed and rolled back. Seconds, 1–600.
+verifyTimeout: 60
+
 environments:
   prod:
     url: https://api.client.com
+    # Once the server exists. These values are used in shell commands, so each one is checked
+    # for shape when shipkit.yaml is loaded: a hostname or IP, a login name, a port from 1 to
+    # 65535, plain Docker/PostgreSQL names. Anything else is a config error, not a guess.
+    # host and hostKey are added together: a host without its hostKey is a config error, since
+    # every SSH connection verifies the server against this line and refuses anything else.
+    # host: api.client.com
+    # sshUser: deploy
+    # sshPort: 22
+    # hostKey: "api.client.com ssh-ed25519 AAAA..."   # from server/bootstrap.sh's output
+    # database: app
+    # dbUser: postgres

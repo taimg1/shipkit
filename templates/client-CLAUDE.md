@@ -13,6 +13,9 @@ less; the reasoning lives in the shipkit repo's docs/adr/ and is read on demand.
 - **Never pass `--yes` without the user approving that exact plan in this conversation.**
   Run `shipkit deploy --plan`, show what it prints, wait for a yes, then pass the token.
   The token proves the plan was displayed; it does not prove anyone agreed to it.
+- **Never run `shipkit deploy --auto`.** It is the merge pipeline's flag: it deploys with no
+  plan shown to anyone, and it is in the workflow for the case where there is nobody to show
+  it to. In a conversation there is — use `--plan`.
 - Tag images with the commit SHA. Never `latest`.
 
 ## Database
@@ -38,8 +41,9 @@ less; the reasoning lives in the shipkit repo's docs/adr/ and is read on demand.
 - `/health` returns `{"status":"ok","version":"<commit sha>"}` and touches no dependency.
   `verify` compares that version against the SHA it just deployed — a 200 carrying the
   previous version is a failed deploy that looks green.
-- `/health/ready` checks the database and returns 503 when it cannot be reached. This is the
-  one monitoring watches; `/health` answers 200 with the schema dropped.
+- `/health/ready` checks the database and returns 503 when it cannot be reached. It is
+  `ready:` in shipkit.yaml, and `verify` requires a 200 from it after every release and every
+  rollback; it is also the one monitoring watches. `/health` answers 200 with the schema dropped.
 
 ## Gates
 

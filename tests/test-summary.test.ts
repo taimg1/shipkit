@@ -80,11 +80,12 @@ test("nothing is pending when the deployed migration is the last one", () => {
   assert.deepEqual(migrationsAfter(ids, "20260101000000_A"), [])
 })
 
-test("an unknown deployed id is treated as everything pending, not nothing", () => {
-  // Failing towards "more to inspect" is the safe direction: treating an unrecognised
-  // marker as "nothing pending" would skip the gate entirely.
+test("an unknown deployed id is not everything pending (B12)", () => {
+  // Production has a migration this commit does not contain: it is ahead, or diverged.
+  // "Everything pending" would script from an id EF cannot find and report every migration
+  // as applied. null is what the adapter refuses on.
   const ids = ["20260101000000_A", "20260202000000_B"]
-  assert.deepEqual(migrationsAfter(ids, "20259999999999_Unknown"), ids)
+  assert.equal(migrationsAfter(ids, "20260303000000_Newer"), null)
 })
 
 // --- target framework -----------------------------------------------------------------

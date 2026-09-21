@@ -1,8 +1,18 @@
 # Copy to .github/workflows/ci.yml in a client repository.
 #
-# ADR 0001: a checkout and one call, nothing else. The pipeline itself lives in the Dagger
-# module, so moving to Gitea Actions, Woodpecker or GitLab CI means rewriting this file, not
-# the pipeline.
+# ADR 0001: a checkout and one call per job, nothing else. The pipeline itself lives in the
+# Dagger module, so moving to Gitea Actions, Woodpecker or GitLab CI means rewriting this file,
+# not the pipeline. Nothing here decides whether a deploy is safe — `deploy --auto` asks the
+# module that, and the module answers with a deploy or with exit 4 and the plan.
+#
+# One workflow, not two. The deploy job `needs: ci`, so it runs on the same checkout, in the
+# same run, after the job that published the image — the image it releases is by construction
+# the one this run built. A separate `workflow_run` workflow would deploy "the latest commit
+# whose ci passed", which is a different commit as soon as two merges land close together.
+#
+# Every action is pinned by commit SHA, with its version in a comment: a tag can be moved to
+# other code by whoever controls the action's repository. To move a pin, resolve the new tag to
+# its commit (`git ls-remote --tags https://github.com/<owner>/<action>`) and update both.
 name: ci
 
 on:
@@ -11,40 +21,175 @@ on:
   pull_request:
     branches: [main]
 
+# Read-only unless the job below says otherwise. Without this the job gets the repository's
+# default token, which on older repositories and organisations is write-all.
+permissions:
+  contents: read
+
+# The Dagger pin, in one place: both jobs install it, and a version that changed in one of them
+# would run the pipeline on two different engines in the same run. The sum is from the release's
+# checksums.txt; the version and the sum change together, never one alone.
+env:
+  DAGGER_VERSION: v0.21.9
+  DAGGER_SHA256: 33eea0b08d6be444bada18e64b2216459100d6070abcb4b5345cee40c9fff982
+
 jobs:
   ci:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # Only with `publish: true` in shipkit.yaml. The default GITHUB_TOKEN carries it; no PAT
-      # is needed. Uncomment together with SHIPKIT_REGISTRY_TOKEN below.
-      # packages: write
+      # Needed because shipkit.yaml says `publish: true`: the push stage uploads the image with
+      # this job's GITHUB_TOKEN; no PAT is needed. With `publish: false` delete this line and
+      # SHIPKIT_REGISTRY_TOKEN below. Only a push to the default branch ever publishes — the
+      # module decides that from the event, not from the branch name a pull request carries.
+      packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # The full history: the migration diff base is the merge base with origin/main.
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
 
+      # Only when `targetArch` in shipkit.yaml is not the runner's (linux-x64), e.g. linux-arm64
+      # for an ARM server: the image is built for the server's architecture, and without binfmt
+      # handlers the emulated .NET build fails with NuGet errors that say nothing about it.
+      # - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+
       - name: Install Dagger
         run: |
-          curl -fsSL https://dl.dagger.io/dagger/install.sh \
-            | DAGGER_VERSION=v0.21.9 BIN_DIR=/usr/local/bin sh
+          set -euo pipefail
+          test "$(uname -sm)" = "Linux x86_64" || { echo "the pinned Dagger checksum is for linux/amd64, this runner is $(uname -sm)"; exit 1; }
+          archive="dagger_${DAGGER_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" "https://dl.dagger.io/dagger/releases/${DAGGER_VERSION#v}/$archive"
+          echo "$DAGGER_SHA256  $RUNNER_TEMP/$archive" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" dagger
+          install -m 0755 "$RUNNER_TEMP/dagger" /usr/local/bin/dagger
 
-      # The kit version is the commit on the `kit:` line of shipkit.yaml — the one place it is
-      # written, so the wrapper and the module it drives cannot come from different commits.
-      #
-      # Fetched as a tarball rather than `npx github:...`: npm 10.9, which ships with Node 22 on
-      # the runners, fails with "GitFetcher requires an Arborist constructor" (#10). Extracted to
-      # RUNNER_TEMP so the kit's own files never become part of --source=.
-      - name: shipkit ci
-        # env:
-        #   SHIPKIT_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Fetch shipkit
         run: |
+          set -euo pipefail
           KIT_SHA=$(sed -n 's#^kit: github.com/taimg1/shipkit@\([0-9a-f]\{40\}\)$#\1#p' shipkit.yaml)
           test -n "$KIT_SHA" || { echo "shipkit.yaml: no pinned kit: line (kit: github.com/taimg1/shipkit@<40-char commit>)"; exit 2; }
           curl -fsSL "https://codeload.github.com/taimg1/shipkit/tar.gz/$KIT_SHA" | tar xz -C "$RUNNER_TEMP"
-          node "$RUNNER_TEMP/shipkit-$KIT_SHA/bin/shipkit" ci
+          echo "SHIPKIT=$RUNNER_TEMP/shipkit-$KIT_SHA/bin/shipkit" >> "$GITHUB_ENV"
+
+      - name: shipkit ci
+        env:
+          # Only a push has anything to publish; a pull request run is not handed the token.
+          SHIPKIT_REGISTRY_TOKEN: ${{ github.event_name == 'push' && secrets.GITHUB_TOKEN || '' }}
+        run: node "$SHIPKIT" ci
+
+  # A merge to the default branch deploys itself, when the plan is one the module may approve
+  # on its own: no destructive SQL, no declared data loss, no provisioning, and the image for
+  # this commit published. Anything else stops with exit 4 — this job goes red, nothing was
+  # deployed, and the step summary carries the plan and the token a person confirms it with.
+  deploy:
+    name: Deploy
+    # Not just "ci passed somewhere": this commit's own ci job, in this run, which is what
+    # published the image being released.
+    needs: [ci]
+    # Never from a pull request, and never from a branch that does not publish an image. The
+    # branch must be the one `defaultBranch:` in shipkit.yaml names — only that branch publishes,
+    # so a mismatch stops at the module's "image was never published" gate rather than releasing
+    # something unreviewed.
+    if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    # One deploy at a time. Two merges landing a minute apart would otherwise migrate the same
+    # database from two runners at once; the module's server-side lock refuses the second, and
+    # this keeps it from ever being started. cancel-in-progress is false on purpose: a deploy
+    # cancelled between `migrate` and `verify` leaves production on a schema nothing has
+    # verified, which is the one state this pipeline exists to avoid. The group is per service
+    # and environment — add the service name if this repository ever deploys more than one.
+    concurrency:
+      group: shipkit-deploy-${{ github.repository }}-prod
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      # Reading the image, not writing one: the deploy pulls what ci published. `packages: read`
+      # is enough for ghcr.io; another registry needs its own credential in SHIPKIT_REGISTRY_TOKEN.
+      packages: read
+    steps:
+      # Default depth: the deploy needs the commit's tree and its SHA, not its history. The
+      # migration diff base is ci's business.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      # No QEMU here: the deploy builds no image. The migration bundle is cross-compiled for the
+      # server's runtime identifier and executed on the server, never on this runner.
+      - name: Install Dagger
+        run: |
+          set -euo pipefail
+          test "$(uname -sm)" = "Linux x86_64" || { echo "the pinned Dagger checksum is for linux/amd64, this runner is $(uname -sm)"; exit 1; }
+          archive="dagger_${DAGGER_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" "https://dl.dagger.io/dagger/releases/${DAGGER_VERSION#v}/$archive"
+          echo "$DAGGER_SHA256  $RUNNER_TEMP/$archive" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" dagger
+          install -m 0755 "$RUNNER_TEMP/dagger" /usr/local/bin/dagger
+
+      - name: Fetch shipkit
+        run: |
+          set -euo pipefail
+          KIT_SHA=$(sed -n 's#^kit: github.com/taimg1/shipkit@\([0-9a-f]\{40\}\)$#\1#p' shipkit.yaml)
+          test -n "$KIT_SHA" || { echo "shipkit.yaml: no pinned kit: line (kit: github.com/taimg1/shipkit@<40-char commit>)"; exit 2; }
+          curl -fsSL "https://codeload.github.com/taimg1/shipkit/tar.gz/$KIT_SHA" | tar xz -C "$RUNNER_TEMP"
+          echo "SHIPKIT=$RUNNER_TEMP/shipkit-$KIT_SHA/bin/shipkit" >> "$GITHUB_ENV"
+
+      # The private half of the key whose public half is in the deploy user's authorized_keys on
+      # the server. A repository secret, never a file in the repository. Written before it holds
+      # anything, so it never exists world-readable for even an instant; $RUNNER_TEMP is wiped
+      # with the runner.
+      - name: Write the deploy key
+        env:
+          SHIPKIT_SSH_KEY: ${{ secrets.SHIPKIT_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$SHIPKIT_SSH_KEY" || { echo "the repository secret SHIPKIT_SSH_KEY is empty: no key to reach the server with"; exit 2; }
+          install -m 600 /dev/null "$RUNNER_TEMP/deploy_key"
+          printf '%s\n' "$SHIPKIT_SSH_KEY" > "$RUNNER_TEMP/deploy_key"
+
+      - name: shipkit deploy --auto
+        env:
+          # The deploy key written above. The kit reads it engine-side as a Dagger secret; it is
+          # never an argument, so it cannot appear in a process listing or in the run log.
+          SHIPKIT_SSH_KEY: ${{ runner.temp }}/deploy_key
+          # The production connection string the migration bundle opens. Only `migrate` uses it.
+          SHIPKIT_DATABASE_URL: ${{ secrets.SHIPKIT_DATABASE_URL }}
+          # Pulling the image onto the server. GITHUB_TOKEN works for ghcr.io in this repository's
+          # own packages (with `packages: read` above); for any other registry, or an image in
+          # another organisation, put a read-only token in a secret and use it here instead.
+          SHIPKIT_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Everything `.kamal/secrets` refers to. That file holds NAME=$NAME references, not
+          # values, and the kit resolves them here, where the environment is — a reference with
+          # nothing behind it stops the deploy before the server is touched (#19), so every name
+          # in your .kamal/secrets needs a line here. These are the ones the example file names;
+          # yours are whatever your file names. KAMAL_REGISTRY_PASSWORD is not among them: the
+          # kit injects it from SHIPKIT_REGISTRY_TOKEN.
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          APP_DB_PASSWORD: ${{ secrets.APP_DB_PASSWORD }}
+          APP_DATABASE_URL: ${{ secrets.APP_DATABASE_URL }}
+        # Exit 0 deployed and verified; exit 4 stopped and changed nothing; anything else is a
+        # gate, the configuration or the infrastructure. All of them but 0 fail this job, which
+        # is the point: a merge that did not reach production must not look like one that did.
+        run: node "$SHIPKIT" deploy --auto --report=reports/deploy.json
+
+      # Both of these run even when the deploy failed or stopped — especially then. The report is
+      # what says which stage ran, where the pre-deploy dump is kept, which version is serving,
+      # and whether a rollback fired.
+      - name: Deploy summary
+        # Unless the kit itself was never fetched — there is nothing to render with, and the
+        # step that failed has already said why.
+        if: always() && env.SHIPKIT != ''
+        run: node "$SHIPKIT" summary reports --title Deploy >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: report-deploy
+          path: reports/deploy.json
+          if-no-files-found: warn

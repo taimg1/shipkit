@@ -47,11 +47,19 @@ export function parseMigrationList(raw: string): string[] {
     .filter((l) => /^\d{14}_/.test(l))
 }
 
-/** Migrations after `from`. When `from` is unknown to the list, everything is pending. */
-export function migrationsAfter(ids: string[], from: string | null): string[] {
+/**
+ * Migrations after `from`, or null when `from` is not in the list.
+ *
+ * Null is not "everything is pending". An unknown `from` means the database (or the base
+ * branch) has a migration this commit does not know — production is ahead of it, or the
+ * histories diverged. Treating that as "everything pending" generated a script from an id EF
+ * cannot find, and a migrate report claiming every migration was applied (B12). The adapter
+ * turns null into an error; this stays pure so the rule is testable without Dagger.
+ */
+export function migrationsAfter(ids: string[], from: string | null): string[] | null {
   if (!from) return ids
   const idx = ids.indexOf(from)
-  return idx < 0 ? ids : ids.slice(idx + 1)
+  return idx < 0 ? null : ids.slice(idx + 1)
 }
 
 /**

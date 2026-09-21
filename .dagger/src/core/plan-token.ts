@@ -33,7 +33,29 @@ export interface DeployPlan {
   sqlDigest: string
   sqlPreview: string
   destructive: boolean
+  /**
+   * What an allow-loss marker in the pending SQL says may be destroyed (core/sql-scan.ts).
+   *
+   * Carried on the plan rather than re-derived by whoever needs it: a waiver is part of what a
+   * confirmation is about, and a second scan of the same SQL somewhere else is a second
+   * implementation of the rule that decides whether a client loses a column.
+   */
+  allowLoss: string[]
+  /**
+   * The digest the registry serves for `imageTag`, or null when nothing answers for it —
+   * including when the project publishes no image at all.
+   *
+   * Part of the token because a tag can be pushed again: without it, a plan confirmed for
+   * `sha-abc` would still execute after `sha-abc` had become a different image.
+   */
+  imageDigest: string | null
   lastVerifiedBackup: string | null
+  /**
+   * The deploy stages this plan was shown for, in order; null (or absent) means all of them.
+   * Part of the token: a plan confirmed for the whole deploy does not authorise running only
+   * part of it (B7).
+   */
+  stages?: string[] | null
   /** Hash of everything above. `--yes` must present this exact token. */
   token: string
 }
@@ -55,6 +77,9 @@ export function planToken(p: Omit<DeployPlan, "token">): string {
     provision: p.provision,
     migrations: p.migrations,
     sqlDigest: p.sqlDigest,
+    allowLoss: p.allowLoss ?? [],
+    imageDigest: p.imageDigest ?? null,
+    stages: p.stages ?? "all",
   })
   return createHash("sha256").update(canonical).digest("hex").slice(0, 12)
 }
@@ -75,8 +100,9 @@ export function renderPlan(p: DeployPlan): string {
     `  migrations  ${p.migrations.length > 0 ? p.migrations.join("\n              ") : "none"}`,
     `  sql         ${p.sqlPreview}`,
     `  backup      will run first; last verified ${p.lastVerifiedBackup ?? "never"}`,
+    ...(p.stages ? [`  stages      ${p.stages.join(", ")} only`] : []),
     "",
-    `  to execute: shipkit deploy --yes=${p.token}`,
+    `  to execute: shipkit deploy --yes=${p.token}${p.stages ? ` --stage=${p.stages.join(",")}` : ""}`,
   ]
   return lines.join("\n")
 }

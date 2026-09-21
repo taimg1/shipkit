@@ -62,7 +62,54 @@ ssh -i ~/.ssh/shipkit_deploy deploy@HOST 'docker info >/dev/null && echo ok'
 
 If this does not print `ok`, stop. Fix it while the password door is still open.
 
-## 4. harden
+## 4. Pin the server's host key
+
+`prepare` (and `harden`, and `check`) end by printing the server's ed25519 host key:
+
+```
+host key (pin as hostKey in shipkit.yaml; docs/runbooks/server-bootstrap.md)
+  fingerprint            SHA256:5kCc5wjjO3Qqwji4vrIROmWSCPd2q9YgX0BqWukHrp4
+  known_hosts line       203.0.113.10 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...
+```
+
+That line goes into `shipkit.yaml`, committed, next to the host it belongs to:
+
+```yaml
+environments:
+  prod:
+    host: 203.0.113.10
+    sshUser: deploy
+    hostKey: "203.0.113.10 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA..."
+```
+
+Every SSH connection the pipeline makes — its own `ssh`/`scp` and Kamal's — trusts that key
+and nothing else (`StrictHostKeyChecking yes`). Without it, every fresh pipeline container
+would trust whichever server answered first, and a man in the middle would be handed a
+docker-group session, a production dump and the database password. A `host` without a
+`hostKey` is a configuration error.
+
+Rules for the line:
+
+- **Its host part is how ssh will look the server up**: the `host` value exactly, and
+  `[host]:port` when `sshPort` is not 22 (`[203.0.113.10]:2222 ssh-ed25519 ...`). `bootstrap.sh`
+  prints it with the server's first IP and the port `harden` sets; if `shipkit.yaml` uses a
+  name, put the name there. `shipkit doctor` checks it. Kamal connects to the hosts in
+  `config/deploy.yml`, so use the same name in both files.
+- **Take it from the server's own output, or verify it against it.** `ssh-keyscan -p <port>
+  <host>` from a workstation is fine for convenience, but it is answered over the same network
+  the pin protects against — compare its fingerprint (`ssh-keygen -lf <file>`) with the one
+  printed on the server before committing it. Best seen through the provider's web console:
+  the root session you ran `prepare` in is itself an SSH connection whose key was accepted on
+  first use, unless the provider showed you its fingerprint.
+- Several lines are allowed (a YAML block scalar, `hostKey: |`), e.g. to pin ecdsa or rsa as
+  well. Types accepted: `ssh-ed25519`, `ecdsa-sha2-nistp256/384/521`, `ssh-rsa`. Hashed
+  (`ssh-keygen -H`) lines work.
+
+**When the server is rebuilt or its keys are regenerated**, every deploy refuses until the new
+key is pinned. That is the point. Get the new fingerprint from the server, not from the
+failing deploy, and change `hostKey` in a reviewed commit.
+
+## 5. harden
 
 ```bash
 ssh root@HOST 'bash -s' -- harden < server/bootstrap.sh
@@ -89,7 +136,8 @@ ssh root@HOST 'bash -s' -- check < server/bootstrap.sh
 ```
 
 Prints the deploy user's groups, whether `deploy` can reach Docker, swap, firewall, the two
-sshd settings, and whether a key login has been seen.
+sshd settings, whether a key login has been seen, and the host key to pin (§4). `check` reads
+the port from sshd itself.
 
 ## What this does not do
 
@@ -97,5 +145,7 @@ Application configuration. No database, no TLS, no DNS: `kamal-proxy` gets the c
 the first deploy, and the database accessory is booted by the deploy's `provision` stage
 (`shipkit deploy --plan` lists it before anything runs).
 
-Nor off-site backups. A backup that lives on the server it protects is not a backup — see
+Nor off-site backups. It creates `/var/backups/shipkit` (mode 700, owned by the deploy user),
+where every deploy stores its verified pre-deploy dump — a deploy fails closed without it. But a
+backup that lives only on the server it protects does not survive losing that server — see
 `docs/runbooks/restore.md`.

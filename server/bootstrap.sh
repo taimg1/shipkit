@@ -106,6 +106,32 @@ report_state() {
   else
     printf '  %-22s %s\n' "key login by ${u}" "never (harden will refuse)"
   fi
+  report_host_key
+}
+
+# The server's ed25519 host key: the line to pin in shipkit.yaml as hostKey, and the
+# fingerprint to check it against. Printed here, on the server, because this is the one place
+# it cannot have been substituted in transit — `ssh-keyscan` from a workstation is answered by
+# whoever sits in the middle, so its output is trusted only once it matches this.
+report_host_key() {
+  local pub=/etc/ssh/ssh_host_ed25519_key.pub ip port name
+  ip=$(hostname -I | awk '{print $1}')
+  # `check` reports the server as it is; prepare and harden report the port harden sets.
+  port=$SSH_PORT
+  if [ "$PHASE" = check ]; then
+    port=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2; exit}')
+    port=${port:-$SSH_PORT}
+  fi
+  if [ "$port" = 22 ]; then name=$ip; else name="[${ip}]:${port}"; fi
+
+  printf '\nhost key (pin as hostKey in shipkit.yaml; docs/runbooks/server-bootstrap.md)\n'
+  if [ -r "$pub" ]; then
+    printf '  %-22s %s\n' "fingerprint" "$(ssh-keygen -lf "$pub" | awk '{print $2}')"
+    printf '  %-22s %s %s\n' "known_hosts line" "$name" "$(cut -d' ' -f1,2 "$pub")"
+    printf '  %-22s %s\n' "" "(replace ${ip} with the name shipkit.yaml uses as host, if different)"
+  else
+    printf '  %-22s %s\n' "ed25519 host key" "MISSING (sshd has none; the pipeline accepts ed25519, ecdsa or rsa)"
+  fi
 }
 
 # --------------------------------------------------------------------------------------------
@@ -147,6 +173,11 @@ prepare() {
   fi
   chown "$USER_NAME:$USER_NAME" "$ssh_dir/authorized_keys"
   chmod 600 "$ssh_dir/authorized_keys"
+
+  # Every deploy stores its verified pre-deploy dump here before migrating, and fails closed if
+  # it cannot (docs/runbooks/restore.md). Production data: the deploy user's and nobody else's.
+  install -d -m 700 -o "$USER_NAME" -g "$USER_NAME" /var/backups/shipkit
+  say "/var/backups/shipkit ready for ${USER_NAME} (mode 700)"
 
   step "3/7  docker"
   if command -v docker >/dev/null 2>&1; then

@@ -9,6 +9,7 @@ Written to be read when something is wrong, by someone who did not build this.
 | [rollback](rollback.md) | the change was wrong and the gates let it through |
 | [restore](restore.md) | the database needs to come back — includes the drill and its date |
 | [add-a-migration](add-a-migration.md) | before writing one, not after a gate refuses it |
+| [registry](registry.md) | the image will not publish, or the server will not pull it |
 | [rotate-a-secret](rotate-a-secret.md) | a key or password changes |
 | [monitoring](monitoring.md) | setting up Uptime Kuma, and what it cannot tell you |
 

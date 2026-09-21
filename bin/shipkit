@@ -13,12 +13,17 @@
  *   shipkit --raw <args...>   pass through to `dagger call`; only the module is added
  */
 import { spawn, spawnSync } from "node:child_process"
-import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync } from "node:fs"
+import * as fs from "node:fs"
+import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync, rmSync } from "node:fs"
 import { dirname, join } from "node:path"
 import {
   COMMAND_OPTIONS,
   EXIT,
+  backupExportDir,
+  backupOut,
+  collectBackup,
   commandKey,
+  executesDeploy,
   expandSecretsFile,
   isDirty,
   namesModule,
@@ -30,7 +35,7 @@ import {
   translate,
   validateOptions,
 } from "./lib.mjs"
-import { renderSummary } from "./summary.mjs"
+import { parseJobResults, renderSummary } from "./summary.mjs"
 
 const USAGE = `
 shipkit — CI/CD for turnkey client projects
@@ -42,16 +47,21 @@ shipkit — CI/CD for turnkey client projects
   shipkit deploy --plan              what would happen; changes nothing
   shipkit deploy --yes=<token>       execute exactly that plan
                                      backup -> migrate -> release -> verify -> rollback -> clean
-  shipkit backup [--out <path>]      a dump proven restorable, written to disk
+  shipkit deploy --auto              deploy without a person, when the plan is safe to:
+                                     the module runs it or exits 4 with the plan and its token
+  shipkit backup [--out <path>]      a dump proven restorable, stored on the server
+                                     and written here with mode 0600
   shipkit rollback <sha>
   shipkit doctor                     dagger? docker? shipkit.yaml? project?
   shipkit summary <dir>              one markdown table from the reports under <dir>
+    [--jobs <file>]                  GitHub's toJSON(needs): a failed job fails the verdict
 
 Options (an option a command does not take is an error, never ignored)
   --json            emit the raw report instead of a rendered table
   --report <path>   also write the raw report here, for \`shipkit summary\` to collect
   --sha <sha>       commit being built (default: git rev-parse HEAD)
-  --branch <name>   branch being built; only the default branch publishes
+  --branch <name>   branch being built; only the default branch publishes. On GitHub
+                    Actions only a push event publishes, whatever --branch says
   --env <name>      deploy target (default: prod)
   --explain         print the underlying \`dagger call\` and exit
   --module <ref>    shipkit module to call; default: the "kit:" line in shipkit.yaml
@@ -60,9 +70,12 @@ Options (an option a command does not take is an error, never ignored)
 
 Options for deploy
   --ssh-key <path>  private key for the target (or SHIPKIT_SSH_KEY)
+  --auto            let the module approve the plan itself when nothing about it needs a
+                    person. Exactly one of --plan, --yes and --auto; together they are an error
 
 Environment
   SHIPKIT_REGISTRY_TOKEN   registry credential
+  SHIPKIT_REGISTRY_USER    who that token belongs to (default: GITHUB_ACTOR, else "shipkit")
   SHIPKIT_SSH_KEY          path to the deploy key
   SHIPKIT_DATABASE_URL     production connection string, used by the migration bundle
   All are read by the engine and never passed as arguments.
@@ -83,10 +96,11 @@ function gitSha() {
   return r.status === 0 ? r.stdout.trim() : "dev"
 }
 
-/** The branch being built. Only the default branch publishes. */
+/**
+ * The checked-out branch, for runs outside GitHub Actions. On Actions the branch comes from the
+ * event instead (publishBranch in lib.mjs): GITHUB_HEAD_REF is named by the pull request's author.
+ */
 function gitBranch() {
-  if (process.env.GITHUB_HEAD_REF) return process.env.GITHUB_HEAD_REF // pull request
-  if (process.env.GITHUB_REF_NAME) return process.env.GITHUB_REF_NAME // push
   const r = spawnSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" })
   return r.status === 0 ? r.stdout.trim() : undefined
 }
@@ -226,6 +240,8 @@ function render(report, logPath) {
       s.tests ? `${s.tests.passed}/${s.tests.total} passed` : "",
       s.base !== undefined ? `base=${s.base}` : "",
       Array.isArray(s.pending) && s.pending.length ? `${s.pending.length} pending` : "",
+      s.backup?.path ? `stored=${s.backup.path}` : "",
+      Array.isArray(s.rollbackWindow) ? `${s.rollbackWindow.length} version(s) left to roll back to` : "",
     ]
       .filter(Boolean)
       .join("  ")
@@ -253,6 +269,9 @@ function render(report, logPath) {
       else if (f.message) lines.push(`        ${f.message}`)
     }
   }
+  if (Array.isArray(report.available)) {
+    lines.push("", `  ${report.available.length} version(s) on the server to roll back to: ${report.available.join(", ") || "none"}`)
+  }
   if (report.rendered) lines.push("", report.rendered)
   if (report.plan && !report.rendered) lines.push("", `  plan token: ${report.plan.token}`)
   if (report.checks) {
@@ -265,6 +284,7 @@ function render(report, logPath) {
   if (report.pending) {
     lines.push(`  pending: ${report.pending.length ? report.pending.join(", ") : "none"}`)
   }
+  if (report.written) lines.push("", `  dump written to ${report.written} (mode 0600)`)
   if (report.dirty) {
     lines.push("", "  ! the source has uncommitted changes: an image built from it is tagged -dirty and never published")
   }
@@ -326,15 +346,26 @@ async function main() {
     const dir = opts._[1]
     if (!dir) fail(EXIT.CONFIG, "summary needs a directory of report files\n  shipkit summary ./reports")
     const title = typeof opts.title === "string" ? opts.title : "CI"
-    process.stdout.write(renderSummary(collectReports(dir), { title }))
+    // GitHub's `needs` results, so a job that failed without writing a report still fails the
+    // verdict. Unreadable counts as failed: the summary must not say ok about what it cannot see.
+    let jobs
+    if (typeof opts.jobs === "string") {
+      try {
+        jobs = parseJobResults(readFileSync(opts.jobs, "utf8"))
+      } catch {
+        jobs = null
+      }
+    }
+    process.stdout.write(renderSummary(collectReports(dir), { title, jobs }))
     // Always 0: this command reports a verdict, it does not reach one. The jobs that ran the
     // stages already failed the run; exiting non-zero here would only hide their reasons.
     process.exit(EXIT.OK)
   }
 
   // A deploy builds its migration bundle from the working tree while releasing the image of a
-  // commit. With uncommitted changes the two would be different code (#6).
-  if (key === "deploy" && typeof opts.yes === "string" && workingTreeDirty()) {
+  // commit. With uncommitted changes the two would be different code (#6). True of an
+  // unattended deploy as much as a confirmed one — more so, since nobody is reading the warning.
+  if (executesDeploy(key, opts) && workingTreeDirty()) {
     fail(
       EXIT.CONFIG,
       "refusing to deploy from a working tree with uncommitted changes\n" +
@@ -347,7 +378,10 @@ async function main() {
   // empty string and deploy as one (#19). Resolved here, where the environment is, and refused
   // here when something has nothing behind it: before the server is touched, not after the
   // database accessory has booted without a password.
-  if (key === "deploy" && typeof opts.yes === "string") {
+  // rollback runs Kamal too, and a rollback with empty secrets boots the old image with an
+  // empty connection string: /health answers, the application reaches nothing. Seen on
+  // dev-server — the readiness check is what caught it.
+  if (executesDeploy(key, opts) || key === "rollback") {
     const secretsPath = join(".kamal", "secrets")
     if (existsSync(secretsPath)) {
       const resolved = expandSecretsFile(readFileSync(secretsPath, "utf8"), process.env)
@@ -356,6 +390,13 @@ async function main() {
           EXIT.CONFIG,
           `.kamal/secrets refers to variables with no value: ${resolved.missing.join(", ")}\n` +
             "  export them where the deploy runs; an empty secret deploys and misbehaves in production",
+        )
+      }
+      if (resolved.unquotable) {
+        fail(
+          EXIT.CONFIG,
+          `.kamal/secrets: these values contain a single quote or a line break: ${resolved.unquotable.join(", ")}\n` +
+            "  Kamal's secrets file cannot carry either literally; change the value (a generated password need not use them)",
         )
       }
       process.env.SHIPKIT_KAMAL_SECRETS = resolved.content
@@ -375,7 +416,7 @@ async function main() {
       fail(
         EXIT.CONFIG,
         "rollback needs the version to put back\n" +
-          "  shipkit rollback sha-a1b2c3d  — `shipkit deploy --plan` shows what is serving now",
+          "  shipkit rollback sha-<commit>  — `shipkit deploy --plan` shows what is serving now",
       )
     }
     fail(
@@ -396,21 +437,50 @@ async function main() {
   if (!daggerAvailable()) {
     process.stderr.write(
       "dagger is not installed or not on PATH\n" +
-        "  install: curl -fsSL https://dl.dagger.io/dagger/install.sh | BIN_DIR=/usr/local/bin sh\n",
+        "  install the version .github/actions/setup/action.yml pins, from https://docs.dagger.io/install\n",
     )
     process.exit(EXIT.INFRA)
+  }
+
+  // `backup` returns a directory, not a report: exported into a private scratch directory
+  // beside --out, and taken apart afterwards. Its stdout is the export path, never JSON (D-01).
+  const exportDir = key === "backup" ? backupExportDir(backupOut(opts)) : undefined
+  if (exportDir) {
+    try {
+      rmSync(exportDir, { recursive: true, force: true })
+      mkdirSync(dirname(exportDir), { recursive: true })
+      mkdirSync(exportDir, { mode: 0o700 })
+    } catch (err) {
+      fail(EXIT.CONFIG, `cannot prepare ${exportDir} for the backup: ${err.message}`)
+    }
   }
 
   const { status, out } = await run(args, { json: !!opts.json })
 
   let report
-  try {
-    report = JSON.parse(out)
-  } catch {
-    // The module always returns JSON. Anything else means Dagger itself failed —
-    // an engine error, a missing function, a module that did not build.
-    process.stderr.write(out || "dagger produced no output\n")
-    process.exit(status === 0 ? EXIT.INFRA : EXIT.INFRA)
+  if (exportDir) {
+    let collected
+    try {
+      collected = collectBackup(exportDir, backupOut(opts), fs)
+    } catch (err) {
+      collected = { error: `could not write ${backupOut(opts)}: ${err.message}` }
+    } finally {
+      rmSync(exportDir, { recursive: true, force: true })
+    }
+    if (collected.error) {
+      process.stderr.write(`${collected.error}\n${out}`)
+      process.exit(EXIT.INFRA)
+    }
+    report = collected.report
+  } else {
+    try {
+      report = JSON.parse(out)
+    } catch {
+      // The module always returns JSON. Anything else means Dagger itself failed —
+      // an engine error, a missing function, a module that did not build.
+      process.stderr.write(out || "dagger produced no output\n")
+      process.exit(EXIT.INFRA)
+    }
   }
 
   const logPath = record(report)

@@ -1,6 +1,8 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { remoteScript, sshArgs } from "../.dagger/src/core/ssh-command.ts"
+import { readFileSync } from "node:fs"
+import { spawnSync } from "node:child_process"
+import { hostKeyOptions, remoteScript, shq, sshArgs, sshPrefix } from "../.dagger/src/core/ssh-command.ts"
 
 const env = {
   url: "http://example.test",
@@ -50,6 +52,38 @@ test("ssh args carry the port, the user and host-key checking", () => {
   const args = sshArgs(env).join(" ")
   assert.match(args, /-p 2222/)
   assert.match(args, /deploy@server\.example/)
-  assert.match(args, /StrictHostKeyChecking=accept-new/)
+  assert.match(args, /StrictHostKeyChecking=yes/)
+  assert.match(args, /UserKnownHostsFile=\/root\/\.ssh\/known_hosts/)
   assert.match(args, /BatchMode=yes/)
+})
+
+test("no ssh or scp anywhere trusts a host key on first sight", () => {
+  // accept-new against a known_hosts file that is empty in every fresh container is no check
+  // at all; `no` is worse. Only the pinned key (hostKey) may be accepted.
+  assert.doesNotMatch(hostKeyOptions.join(" "), /accept-new|StrictHostKeyChecking=no/)
+  for (const file of ["ssh-command.ts", "ssh.ts", "migrate.ts", "release.ts", "backup.ts", "plan.ts", "history.ts"]) {
+    const src = readFileSync(new URL(`../.dagger/src/core/${file}`, import.meta.url), "utf8")
+    assert.doesNotMatch(src, /StrictHostKeyChecking=(accept-new|no)\b/, file)
+  }
+})
+
+test("shq: any value comes back from a shell exactly as it went in", () => {
+  const values = ["", "plain", "it's", `a"b$c\`d\\e'f g`, "$(id)", "`id`", "a;b|c&d", "-rf", "\n\t", "'''"]
+  for (const v of values) {
+    const r = spawnSync("sh", ["-c", `printf '%s' ${shq(v)}`], { encoding: "utf8" })
+    assert.equal(r.stdout, v, JSON.stringify(v))
+  }
+})
+
+test("shq: safe values stay readable, anything else is single-quoted", () => {
+  assert.equal(shq("deploy@server.example"), "deploy@server.example")
+  assert.equal(shq("StrictHostKeyChecking=accept-new"), "StrictHostKeyChecking=accept-new")
+  assert.equal(shq("a b"), "'a b'")
+  assert.equal(shq("it's"), `'it'\\''s'`)
+})
+
+test("the ssh prefix quotes the user and host, so neither can add a command", () => {
+  const hostile = { ...env, sshUser: "deploy;touch pwned", host: "h$(id)" }
+  assert.match(sshPrefix(hostile), / 'deploy;touch pwned@h\$\(id\)'$/)
+  assert.match(remoteScript(hostile, "true"), /'deploy;touch pwned@h\$\(id\)' sh$/)
 })

@@ -7,6 +7,9 @@ import {
   parseAllowedLosses,
   applyAllowances,
   migrationForLine,
+  statementTargets,
+  allowedByMarker,
+  ALLOW_LOSS_EXAMPLE,
 } from "../.dagger/src/core/sql-scan.ts"
 
 // The EF rename trap: this is exactly what EF emits when a property is renamed.
@@ -73,13 +76,57 @@ test("an ordinary additive migration passes", () => {
 })
 
 test("unparseable Squawk output is a finding, never a pass", () => {
-  const f = parseSquawk("panic: something went wrong")
+  const f = parseSquawk("panic: something went wrong", 1)
   assert.equal(f.length, 1)
   assert.equal(f[0].rule, "squawk-output-unparseable")
 })
 
-test("empty Squawk output is a pass", () => {
-  assert.deepEqual(parseSquawk("   "), [])
+test("a clean file is exit 0 with an empty array, and that is a pass", () => {
+  // Observed on squawk-cli 2.65.0: a clean file prints `[]`, it does not print nothing.
+  assert.deepEqual(parseSquawk("[]\n", 0), [])
+})
+
+test("empty Squawk output is never a pass, whatever the exit code", () => {
+  // A missing file or a broken .squawk.toml: exit 1, nothing on stdout, the reason on stderr.
+  // This used to read as "0 violations".
+  for (const code of [0, 1]) {
+    const f = parseSquawk("   ", code, "Configuration error: unexpected eof encountered at line 2 column 1")
+    assert.equal(f.length, 1)
+    assert.equal(f[0].rule, "squawk-did-not-run")
+    assert.match(f[0].message!, /Configuration error/)
+    assert.match(f[0].message!, new RegExp(`exit ${code}`))
+  }
+})
+
+test("an unexpected exit code fails even with a clean-looking report", () => {
+  // Exit 2 is a CLI usage error (an unknown --reporter value, a renamed flag).
+  const f = parseSquawk("[]", 2, "error: invalid value 'jsonx' for '--reporter <REPORTER>'")
+  assert.equal(f.length, 1)
+  assert.equal(f[0].rule, "squawk-did-not-run")
+})
+
+test("a crashed Squawk (signal, OOM) is not a pass", () => {
+  assert.equal(parseSquawk("", 137)[0].rule, "squawk-did-not-run")
+})
+
+test("garbage and wrong-shaped JSON are findings, not passes", () => {
+  assert.equal(parseSquawk("{not json", 1)[0].rule, "squawk-output-unparseable")
+  // Valid JSON that is not the reporter's array of violations.
+  assert.equal(parseSquawk('{"error":"boom"}', 1)[0].rule, "squawk-output-unparseable")
+  assert.equal(parseSquawk('[{"message":"no rule name"}]', 1)[0].rule, "squawk-output-unparseable")
+  assert.equal(parseSquawk('"ok"', 0)[0].rule, "squawk-output-unparseable")
+})
+
+test("exit 1 with no violations listed is a failure, not a pass", () => {
+  const f = parseSquawk("[]", 1)
+  assert.equal(f.length, 1)
+  assert.equal(f[0].rule, "squawk-did-not-run")
+})
+
+test("violations reported with exit 0 are still findings", () => {
+  const f = parseSquawk(JSON.stringify([{ rule_name: "ban-drop-column", line: 0 }]), 0)
+  assert.equal(f.length, 1)
+  assert.equal(f[0].rule, "ban-drop-column")
 })
 
 test("parses Squawk findings and converts its zero-based line", () => {
@@ -93,15 +140,21 @@ test("parses Squawk findings and converts its zero-based line", () => {
       message: "Concurrent index creation is preferred",
       help: "Use CREATE INDEX CONCURRENTLY",
     },
-  ]))
+  ]), 1)
   assert.equal(f[0].rule, "require-concurrent-index-creation")
   assert.equal(f[0].line, 14, "zero-based 13 is line 14")
   assert.match(f[0].message!, /Concurrent index creation is preferred — Use CREATE INDEX CONCURRENTLY/)
 })
 
 test("a finding on the very first line is reported as line 1, not line 0", () => {
-  const f = parseSquawk(JSON.stringify([{ rule_name: "ban-drop-column", line: 0 }]))
+  const f = parseSquawk(JSON.stringify([{ rule_name: "ban-drop-column", line: 0 }]), 1)
   assert.equal(f[0].line, 1)
+})
+
+test("real squawk-cli 2.65.0 output for a DROP COLUMN parses", () => {
+  const raw = `[{"file":"bad.sql","line":0,"column":14,"level":"Warning","message":"Dropping a column may break existing clients.","help":null,"rule_name":"ban-drop-column","column_end":27,"line_end":0}]`
+  const f = parseSquawk(raw, 1)
+  assert.deepEqual(f.map((x) => [x.rule, x.line]), [["ban-drop-column", 1]])
 })
 
 // --- Real output captured from fixtures/dotnet-api on 2026-09-12 -------------------------
@@ -238,4 +291,66 @@ test("a leading BOM does not shift the attribution", () => {
 
 test("a script that records no migration attributes nothing", () => {
   assert.equal(migrationForLine("DROP TABLE x;", 1, "__EFMigrationsHistory"), undefined)
+})
+
+// --- allow-loss matches exactly what a statement touches (B9) ---
+
+test("a column marker does not waive a different column whose name contains it", () => {
+  // `orders.Id` used to waive anything whose line contained "Id".
+  const sql = `-- shipkit:allow-loss orders.Id  reviewed
+ALTER TABLE "invoices" DROP COLUMN "CustomerId";`
+  const f = scanDestructive(sql)
+  assert.equal(f.length, 1)
+  assert.equal(applyAllowances([{ rule: "ban-drop-column", line: 2 }], sql, ["orders.Id"]).length, 1)
+})
+
+test("a column marker does not waive the same column name in another table", () => {
+  const sql = `-- shipkit:allow-loss orders.CreatedAt  reviewed
+ALTER TABLE invoices DROP COLUMN "CreatedAt";`
+  assert.equal(scanDestructive(sql).length, 1)
+})
+
+test("a column marker does not waive a column that merely starts with its name", () => {
+  const sql = `-- shipkit:allow-loss orders.CreatedAt  reviewed
+ALTER TABLE orders DROP COLUMN "CreatedAtUtc";`
+  assert.equal(scanDestructive(sql).length, 1)
+})
+
+test("a table marker waives dropping that table and its columns, and nothing else", () => {
+  const sql = `-- shipkit:allow-loss legacy_orders  table is unused
+DROP TABLE legacy_orders;
+ALTER TABLE legacy_orders DROP COLUMN "Note";
+DROP TABLE legacy_orders_archive;`
+  const f = scanDestructive(sql)
+  assert.deepEqual(f.map((x) => x.line), [4])
+})
+
+test("a statement touching two things is waived only when both are named", () => {
+  const sql = `-- shipkit:allow-loss orders.A  reviewed
+ALTER TABLE orders DROP COLUMN "A", DROP COLUMN "B";`
+  assert.equal(scanDestructive(sql).length, 1)
+  const both = `-- shipkit:allow-loss orders.A  reviewed\n-- shipkit:allow-loss orders.B  reviewed\nALTER TABLE orders DROP COLUMN "A", DROP COLUMN "B";`
+  assert.deepEqual(scanDestructive(both), [])
+})
+
+test("identifiers are compared as PostgreSQL reads them", () => {
+  // Bare identifiers fold to lower case; quoted ones keep their case; a schema is not part
+  // of the target, as in the apply-to-copy snapshot.
+  assert.deepEqual(statementTargets(`ALTER TABLE public."Orders" DROP COLUMN "CreatedAt";`), ["Orders.CreatedAt"])
+  assert.deepEqual(statementTargets(`ALTER TABLE Orders DROP COLUMN CreatedAt;`), ["orders.createdat"])
+  assert.deepEqual(statementTargets(`DROP TABLE IF EXISTS a, public.b CASCADE;`), ["a", "b"])
+  assert.deepEqual(statementTargets(`ALTER TABLE orders ALTER COLUMN total TYPE numeric(18,2);`), ["orders.total"])
+  assert.deepEqual(statementTargets(`ALTER TABLE orders RENAME COLUMN "A" TO "B";`), ["orders.A"])
+})
+
+test("a line that names no table is never waived", () => {
+  assert.equal(statementTargets(`    "Reference" character varying(64) NOT NULL,`), null)
+  assert.equal(allowedByMarker(`DROP DATABASE app;`, ["app"]), false)
+})
+
+test("the marker the destructive-sql gate suggests is the marker the scanner reads (B17)", () => {
+  // gates.ts builds its advice from ALLOW_LOSS_EXAMPLE; this proves the example parses.
+  const filled = ALLOW_LOSS_EXAMPLE.replace("<table>.<column>", "orders.CreatedAt").replace("<reason>", "reviewed")
+  assert.deepEqual(parseAllowedLosses(filled), ["orders.CreatedAt"])
+  assert.deepEqual(scanDestructive(`${filled}\nALTER TABLE orders DROP COLUMN "CreatedAt";`), [])
 })

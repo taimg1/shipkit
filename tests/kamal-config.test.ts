@@ -1,6 +1,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { checkSsh, declaredSecrets, missingSecrets, parseKamalSsh } from "../.dagger/src/core/kamal-config.ts"
+import { readFileSync } from "node:fs"
+import { checkSsh, declaredSecrets, hostKeyRefusal, kamalHostKeyProblem, missingSecrets, parseKamalSsh } from "../.dagger/src/core/kamal-config.ts"
 
 test("reads ssh user and port from deploy.yml", () => {
   const yml = `service: app\nssh:\n  user: deploy\n  port: 2222   # dev-server\nproxy:\n  ssl: false\n`
@@ -117,4 +118,36 @@ test("an empty value counts as missing", () => {
 
 test("everything provided is nothing missing", () => {
   assert.deepEqual(missingSecrets(["A", "B"], "A=1\nB=2\n"), [])
+})
+
+test("a deploy.yml that leaves ssh.config alone lets Kamal verify host keys", () => {
+  assert.equal(kamalHostKeyProblem(`ssh:\n  user: deploy\n  port: 22\n`), null)
+  assert.equal(kamalHostKeyProblem(`service: app\n`), null)
+  assert.equal(kamalHostKeyProblem(`ssh:\n  config: true   # default\n`), null)
+})
+
+test("ssh.config false or a path switches host key verification off, so it is refused", () => {
+  assert.match(kamalHostKeyProblem(`ssh:\n  user: deploy\n  config: false\n`) ?? "", /ssh\.config to false/)
+  assert.match(kamalHostKeyProblem(`ssh:\n  config: [ "~/.ssh/myconfig" ]\n`) ?? "", /ssh\.config/)
+  assert.match(kamalHostKeyProblem(`ssh:\n  config:\n    - ~/.ssh/myconfig\n`) ?? "", /a list/)
+})
+
+test("a config key under another block is not ssh.config", () => {
+  assert.equal(kamalHostKeyProblem(`builder:\n  config: false\nssh:\n  user: deploy\n`), null)
+})
+
+test("an inline ssh block cannot be checked, so it is refused", () => {
+  assert.match(kamalHostKeyProblem(`ssh: { user: deploy, config: false }\n`) ?? "", /inline/)
+})
+
+test("the fixture's deploy.yml passes", () => {
+  const yml = readFileSync(new URL("../fixtures/dotnet-api/config/deploy.yml", import.meta.url), "utf8")
+  assert.equal(kamalHostKeyProblem(yml), null)
+})
+
+test("net-ssh's host key refusals are recognised in Kamal's output", () => {
+  const out = `  ERROR (SSHKit::Runner::ExecuteError): Exception while executing on host h: fingerprint SHA256:abc is unknown for "[h]:2222"\n`
+  assert.equal(hostKeyRefusal(out), 'fingerprint SHA256:abc is unknown for "[h]:2222"')
+  assert.match(hostKeyRefusal(`fingerprint SHA256:x/y+z does not match for "1.2.3.4"`) ?? "", /does not match/)
+  assert.equal(hostKeyRefusal("App Host: h\nsha-abc1234\n"), null)
 })

@@ -110,11 +110,53 @@ export function missingSecrets(declared: readonly string[], secretsFile: string)
   const provided = new Map<string, string>()
   for (const raw of secretsFile.split("\n")) {
     const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(raw.replace(/\s+$/, ""))
-    if (m) provided.set(m[1], m[2].trim())
+    // The wrapper writes resolved values single-quoted (bin/lib.mjs, expandSecretsFile).
+    if (m) provided.set(m[1], m[2].trim().replace(/^'(.*)'$/, "$1"))
   }
   return declared.filter((name) => {
     const value = provided.get(name)
     // An unresolved reference counts as absent: it is a name, not a value.
     return value === undefined || value === "" || /^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(value)
   })
+}
+
+/**
+ * Why Kamal would NOT verify the server's host key with this deploy.yml, or null if it would.
+ *
+ * The kit makes Kamal verify through ~/.ssh/config (core/known-hosts.ts). Kamal hands
+ * `ssh.config` straight to net-ssh, and anything but `true` stops that file being read:
+ * `false` reads no file, a path reads only that path. Either way net-ssh falls back to trusting
+ * whichever key it sees first, so the pipeline refuses instead. Line by line like the rest of
+ * this file; a flow-style `ssh: {...}` is refused too, since it cannot be read that way.
+ */
+export function kamalHostKeyProblem(deployYml: string): string | null {
+  let inSsh = false
+  for (const raw of deployYml.split("\n")) {
+    const line = raw.replace(/\s+#.*$/, "").replace(/\s+$/, "")
+    if (/^\S/.test(line)) {
+      inSsh = /^ssh:$/.test(line)
+      if (/^ssh:\s*\S/.test(line)) {
+        return "config/deploy.yml writes the ssh block inline; write it as a block so ssh.config can be checked"
+      }
+      continue
+    }
+    if (!inSsh) continue
+    const m = /^\s+config:\s*(.*)$/.exec(line)
+    if (m && !/^["']?true["']?$/.test(m[1])) {
+      return (
+        `config/deploy.yml sets ssh.config to ${m[1] === "" ? "a list" : m[1]}, which stops Kamal ` +
+        `reading the ssh config that makes it verify the server's host key`
+      )
+    }
+  }
+  return null
+}
+
+/**
+ * net-ssh's refusal of a host key, if Kamal's output contains one: `fingerprint SHA256:… is
+ * unknown for "[host]:22"` or `… does not match for …`. Pulled out of output that is otherwise
+ * tolerated, so a refused key cannot pass for "nothing deployed yet".
+ */
+export function hostKeyRefusal(output: string): string | null {
+  return /fingerprint \S+ (?:is unknown|does not match) for "[^"]*"/.exec(output)?.[0] ?? null
 }

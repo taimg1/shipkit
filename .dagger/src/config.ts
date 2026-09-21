@@ -1,6 +1,11 @@
 import { Directory } from "@dagger.io/dagger"
 import { parse } from "yaml"
 import { configError } from "./errors.js"
+import { hostKeyHint, parseKnownHosts } from "./core/known-hosts.js"
+import { configProblem } from "./config-validate.js"
+import { parseRetention } from "./core/backup-store.js"
+import { DEFAULT_MIGRATION_TIMEOUTS, MigrationTimeouts, pgDuration } from "./core/migrate-options.js"
+import { verifySettings } from "./core/health.js"
 
 export type StackName = "dotnet" | "nest" | "next" | "custom"
 export type DbKind = "postgres" | "none"
@@ -13,6 +18,13 @@ export interface Config {
   db: DbKind
   delivery: Delivery
   health: string
+  /**
+   * Readiness path: 200 only when the application can reach its database. Required unless
+   * db is "none"; `verify` demands it after every release, on top of the version on `health`.
+   */
+  ready?: string
+  /** Seconds `verify` keeps retrying before the release is declared failed. Default 60. */
+  verifyTimeout: number
   /** Path to the startup project — required by `dotnet ef`, never guessed. */
   project: string
   /** Path to the project holding the migrations. Differs from `project` in most solutions. */
@@ -51,8 +63,18 @@ export interface Config {
    * failure happens on the server, mid-deploy, after the backup has already run.
    */
   targetArch: string
+  /**
+   * How many verified pre-deploy dumps to keep on the server, per service. Older ones are
+   * deleted after each new one is stored. Default 10.
+   */
+  backupRetention: number
   /** Deploy targets by name; `prod` must exist for `deploy`. */
   environments: Record<string, Environment>
+  /**
+   * lock_timeout and statement_timeout for the connection the migration bundle opens
+   * (`migrations:` in shipkit.yaml). They are why Squawk's two timeout rules can stay excluded.
+   */
+  migrationTimeouts: MigrationTimeouts
 }
 
 export interface Environment {
@@ -60,6 +82,11 @@ export interface Environment {
   url: string
   /** SSH host. Absent until the environment is provisioned. */
   host?: string
+  /**
+   * known_hosts line(s) for `host`, committed with the project. Public, not a secret — and the
+   * only thing that tells the pipeline it is talking to the real server (core/known-hosts.ts).
+   */
+  hostKey?: string
   sshPort: number
   sshUser: string
   /** PostgreSQL container on the server. Defaults to Kamal's accessory naming. */
@@ -118,7 +145,12 @@ export async function loadConfig(source: Directory): Promise<Config> {
     throw configError(`delivery must be "kamal" or "static"`)
   }
 
+  const verifyCfg = verifySettings(c, db)
+  if (!verifyCfg.ok) throw configError(verifyCfg.message, verifyCfg.next)
+
   const service = (c.service as string) ?? ""
+  const retention = parseRetention(c.backupRetention)
+  if (!retention.ok) throw configError(retention.reason, "Set it to how many dumps to keep, e.g. 10.")
   const rawEnvironments = (c.environments ?? {}) as Record<string, Record<string, unknown>>
   const environments: Record<string, Environment> = {}
 
@@ -135,10 +167,26 @@ export async function loadConfig(source: Directory): Promise<Config> {
         'Add sshUser (e.g. "deploy") — the same user as ssh.user in config/deploy.yml.',
       )
     }
+    // No host without its key: without a pin every connection trusts whoever answers first.
+    const sshPort = Number(env.sshPort ?? 22)
+    if (env.host !== undefined && (typeof env.hostKey !== "string" || env.hostKey.trim() === "")) {
+      throw configError(
+        `environment "${name}" has a host but no hostKey`,
+        hostKeyHint(String(env.host), sshPort),
+      )
+    }
+    if (env.hostKey !== undefined) {
+      try {
+        parseKnownHosts(String(env.hostKey))
+      } catch (e) {
+        throw configError(`environment "${name}": ${(e as Error).message}`, hostKeyHint(String(env.host ?? "<host>"), sshPort))
+      }
+    }
     environments[name] = {
       url: env.url,
       host: env.host as string | undefined,
-      sshPort: Number(env.sshPort ?? 22),
+      hostKey: env.hostKey === undefined ? undefined : String(env.hostKey),
+      sshPort,
       sshUser: (env.sshUser as string) ?? "",
       // Kamal names an accessory's container "<service>-<accessory>" and puts it on a
       // network called "kamal". Deriving them keeps two more values out of every config,
@@ -150,12 +198,28 @@ export async function loadConfig(source: Directory): Promise<Config> {
     }
   }
 
-  return {
+  const rawMigrations = (c.migrations ?? {}) as Record<string, unknown>
+  const migrationTimeouts = { ...DEFAULT_MIGRATION_TIMEOUTS }
+  for (const key of ["lockTimeout", "statementTimeout"] as const) {
+    if (rawMigrations[key] === undefined) continue
+    const value = pgDuration(rawMigrations[key])
+    if (value === null) {
+      throw configError(
+        `migrations.${key} must be a PostgreSQL duration with a unit, e.g. "5s" or "15min"`,
+        "A bare number is milliseconds to PostgreSQL, and 0 switches the timeout off.",
+      )
+    }
+    migrationTimeouts[key] = value
+  }
+
+  const config: Config = {
     kit: c.kit as string | undefined,
     stack: stack as StackName,
     db,
     delivery,
     health: (c.health as string) ?? "/health",
+    ready: verifyCfg.ready,
+    verifyTimeout: verifyCfg.verifyTimeout,
     project: req(c, "project"),
     migrationsProject: c.migrationsProject as string | undefined,
     dockerfile: (c.dockerfile as string) ?? "Dockerfile",
@@ -165,8 +229,14 @@ export async function loadConfig(source: Directory): Promise<Config> {
     targetArch: (c.targetArch as string) ?? "linux-x64",
     defaultBranch: (c.defaultBranch as string) ?? "main",
     publish: c.publish === undefined ? true : c.publish === true,
+    backupRetention: retention.value,
     environments,
+    migrationTimeouts,
   }
+  // Every value that reaches a shell is checked for shape here, before anything runs.
+  const problem = configProblem(config)
+  if (problem) throw configError(problem.message, problem.next)
+  return config
 }
 
 function req(c: Record<string, unknown>, key: string): string {

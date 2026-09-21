@@ -34,13 +34,25 @@ registry:
 builder:
   arch: arm64
 
+# The rollback window. `kamal prune all` (the deploy's clean stage) keeps this many stopped
+# containers and the images they use; `kamal rollback` can only boot a version whose container
+# survived. Kamal's default, written out so nobody lowers it without seeing what it costs.
+retain_containers: 5
+
 env:
-  clear:
-    ConnectionStrings__Default: "Host=shipkit-fixture-db;Port=5432;Database=app;Username=postgres;Password=postgres"
+  # A connection string holds a password, so it is a secret: never under `clear`, which is
+  # committed here and shown by `docker inspect`. Its value comes from .kamal/secrets.
+  #
+  # The application connects as `app`, a role that can read and write rows and nothing else.
+  # Schema changes are the migration bundle's job, run by the pipeline as the owner (ADR 0005);
+  # an application that could run DDL would not need the pipeline to do it.
+  secret:
+    - ConnectionStrings__Default
 
 accessories:
   db:
-    image: postgres:17-alpine
+    # postgres:17-alpine, pinned by digest: the same image the kit restores backups into.
+    image: postgres:17-alpine@sha256:f02121de6f74d30d8a94cd1d9584125e2178d7e6c377d8130112d4e52d867995
     host: host.docker.internal
     env:
       clear:
@@ -48,6 +60,11 @@ accessories:
         POSTGRES_DB: app
       secret:
         - POSTGRES_PASSWORD
+        - APP_DB_PASSWORD
+    files:
+      # Creates the `app` role the first time the data directory is initialised. On a server
+      # whose database already exists it does not run — see the fixture README.
+      - config/postgres/create-app-role.sh:/docker-entrypoint-initdb.d/10-create-app-role.sh
     directories:
       # A named volume. Never an ephemeral filesystem — losing this is losing the database.
       - data:/var/lib/postgresql/data

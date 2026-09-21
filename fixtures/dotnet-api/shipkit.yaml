@@ -21,6 +21,9 @@ registry: ghcr.io/taimg1/shipkit-fixture
 # decision rather than skipped by accident.
 publish: false
 health: /health
+# Readiness: 200 only when the app can reach its database (src/Api/Program.cs). verify requires
+# it after every release — /health alone passes with a wrong database password.
+ready: /health/ready
 
 # Must match the SERVER's architecture, not the machine that builds the bundle. dev-server
 # is aarch64; a linux-x64 bundle would fail on it mid-deploy, after the backup has run.
@@ -33,5 +36,8 @@ environments:
     host: host.docker.internal
     sshPort: 2222
     sshUser: deploy
+    # dev-server's fixed host key (dev-server/host-key/). A real server's comes from
+    # server/bootstrap.sh's output — see docs/runbooks/server-bootstrap.md.
+    hostKey: "[host.docker.internal]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINzSeby1W18fIv7pys7p0Pe4xiOEGK65dXpurYBTf5d1"
     database: app
     dbUser: postgres

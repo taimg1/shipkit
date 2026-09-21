@@ -38,6 +38,6 @@ node_modules/
 # local dev-server credentials — generated per machine, never shared
 dev-server/.ssh/
 
-# Kamal secrets are never committed. The fixture's are checked in deliberately as
-# simulation-only values; a client repo must not follow that example.
+# Kamal secrets are never committed. The fixture's is checked in deliberately: it holds
+# references to variables, not values, and is the example a client repo copies.
 !fixtures/dotnet-api/.kamal/secrets

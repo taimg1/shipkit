@@ -1,6 +1,7 @@
 import { Container, Secret } from "@dagger.io/dagger"
 import { Config } from "../config.js"
 import { EXIT, ShipkitError } from "../errors.js"
+import { DEFAULT_REGISTRY_USER, pushFailureHint, registryProblem } from "./registry.js"
 
 /**
  * Publishes the image built by the `build` stage.
@@ -16,20 +17,16 @@ export async function push(
   token?: Secret,
   username?: string,
 ): Promise<string> {
-  if (cfg.registry.length === 0) {
-    throw new ShipkitError(
-      EXIT.CONFIG,
-      "no registry configured",
-      'Set "registry" in shipkit.yaml, e.g. ghcr.io/<owner>/<image>.',
-    )
-  }
+  const problem = registryProblem(cfg.registry)
+  if (problem) throw new ShipkitError(EXIT.CONFIG, problem.message, problem.next)
 
   const address = `${cfg.registry}:${tag}`
   const registryHost = cfg.registry.split("/")[0]
+  const user = username && username.length > 0 ? username : DEFAULT_REGISTRY_USER
 
   let publishable = image
   if (token) {
-    publishable = image.withRegistryAuth(registryHost, username ?? "shipkit", token)
+    publishable = image.withRegistryAuth(registryHost, user, token)
   }
 
   try {
@@ -41,9 +38,7 @@ export async function push(
     throw new ShipkitError(
       EXIT.INFRA,
       `publishing to ${address} failed: ${message}`,
-      token
-        ? "Check that the token can write packages to this registry."
-        : "No registry token was provided. Pass --registry-token for a registry that requires authentication.",
+      pushFailureHint(token ? user : undefined, registryHost),
     )
   }
 }

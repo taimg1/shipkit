@@ -2,12 +2,14 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import {
   commandKey,
+  executesDeploy,
   expandSecretsFile,
   isDirty,
   newestMigrationId,
   parseArgs,
   parseDefaultBranch,
   parseKitRef,
+  publishBranch,
   rawCallArgs,
   resolveModule,
   translate,
@@ -137,6 +139,100 @@ test("a bare --yes is a missing confirmation, exit 4", () => {
   assert.equal(argsFor(["deploy", "--yes"]).invalid?.code, 4)
 })
 
+test("deploy --plan is built for the same --stage the deploy will run (B7)", () => {
+  const plan = argsFor(["deploy", "--plan", "--stage=backup,migrate"]).args
+  assert.equal(plan[0], "deploy-plan")
+  assert.ok(plan.includes("--stage=backup,migrate"))
+  const run = argsFor(["deploy", "--yes=abc", "--stage=backup,migrate"]).args
+  assert.ok(run.includes("--stage=backup,migrate"))
+  assert.ok(!argsFor(["deploy", "--plan"]).args.some((a: string) => a.startsWith("--stage")))
+})
+
+// --- the unattended path (--auto) ---
+
+test("deploy --auto asks the module to approve the plan, and carries no token", () => {
+  // The wrapper cannot judge a plan safe: it says only that nobody is waiting at a terminal.
+  // The module decides, and refuses with exit 4 when the plan is not one it may self-approve.
+  const args = argsFor(["deploy", "--auto"]).args
+  assert.equal(args[0], "deploy")
+  assert.ok(args.includes("--auto-approve=true"))
+  assert.ok(!args.some((a: string) => a.startsWith("--plan-token")))
+})
+
+test("an automatic deploy is given everything a confirmed one is", () => {
+  // Same credentials, same actor. A deploy that migrates without --db-url fails at the
+  // migrate stage, with the backup already taken.
+  const env = { SHIPKIT_SSH_KEY: "/k", SHIPKIT_DATABASE_URL: "x", SHIPKIT_KAMAL_SECRETS: "A=1", GITHUB_ACTOR: "bot" }
+  const auto = argsFor(["deploy", "--auto"], ctx({ env })).args
+  const confirmed = argsFor(["deploy", "--yes=abc"], ctx({ env })).args
+  const credentials = (a: string[]) => a.filter((x) => /^--(ssh-key|db-url|registry-token|kamal-secrets|actor)=/.test(x))
+  assert.deepEqual(credentials(auto), credentials(confirmed))
+  assert.ok(auto.includes("--actor=bot"))
+})
+
+test("--auto is built for the stages it will run, like --yes (B7)", () => {
+  assert.ok(argsFor(["deploy", "--auto", "--stage=backup,migrate"]).args.includes("--stage=backup,migrate"))
+})
+
+test("--auto and --yes together is an error, not a silent precedence", () => {
+  // Two different answers to "who approved this". Whichever won silently, the other was
+  // ignored — and one of them means "nobody looked at it".
+  const both = argsFor(["deploy", "--auto", "--yes=abc"])
+  assert.equal(both.invalid?.code, 2)
+  assert.match(both.invalid!.message, /--auto and --yes/)
+  // Either order, and the same for --plan: a plan changes nothing, --auto changes production.
+  assert.equal(argsFor(["deploy", "--yes=abc", "--auto"]).invalid?.code, 2)
+  assert.match(argsFor(["deploy", "--auto", "--plan"]).invalid!.message, /--auto and --plan/)
+})
+
+test("--auto takes no value", () => {
+  const { invalid } = argsFor(["deploy", "--auto=true"])
+  assert.equal(invalid?.code, 2)
+  assert.match(invalid!.message, /--auto takes no value/)
+})
+
+test("both ways of executing a deploy are guarded before the module is called", () => {
+  // The dirty-tree refusal and the resolved Kamal secrets hang off this predicate. It used to
+  // be "--yes is a string" spelled out twice, which --auto would have walked straight past.
+  assert.equal(executesDeploy("deploy", { yes: "abc" }), true)
+  assert.equal(executesDeploy("deploy", { auto: true }), true)
+  assert.equal(executesDeploy("deploy", { plan: true }), false)
+  assert.equal(executesDeploy("deploy", {}), false)
+  assert.equal(executesDeploy("ci", { auto: true }), false)
+})
+
+test("deploy names who is running it, for the deploy lock (B13)", () => {
+  const args = argsFor(["deploy", "--yes=abc"], ctx({ env: { USER: "alice" } })).args
+  assert.ok(args.includes("--actor=alice"))
+  const ci = argsFor(["deploy", "--yes=abc"], ctx({ env: { USER: "runner", GITHUB_ACTOR: "bob" } })).args
+  assert.ok(ci.includes("--actor=bob"))
+  assert.ok(!argsFor(["deploy", "--yes=abc"]).args.some((a: string) => a.startsWith("--actor")))
+})
+
+// A registry that requires a password checks the username too, and the username was the one
+// value nobody could set: GITHUB_ACTOR or the module's "shipkit" fallback. Pushing a real
+// image to a local registry:2 with htpasswd is what showed it — a correct token, 401, and a
+// hint that said to check the token (docs/runbooks/registry.md).
+test("the registry username can be named outside GitHub Actions", () => {
+  const env = { SHIPKIT_REGISTRY_TOKEN: "t", SHIPKIT_REGISTRY_USER: "shipkit-ci" }
+  const args = argsFor(["ci"], ctx({ env })).args
+  assert.ok(args.includes("--registry-token=env:SHIPKIT_REGISTRY_TOKEN"))
+  assert.ok(args.includes("--registry-user=shipkit-ci"))
+})
+
+test("SHIPKIT_REGISTRY_USER wins over GITHUB_ACTOR, which still works on Actions", () => {
+  const both = { SHIPKIT_REGISTRY_TOKEN: "t", SHIPKIT_REGISTRY_USER: "bot", GITHUB_ACTOR: "bob" }
+  assert.ok(argsFor(["ci"], ctx({ env: both })).args.includes("--registry-user=bot"))
+  const actor = { SHIPKIT_REGISTRY_TOKEN: "t", GITHUB_ACTOR: "bob" }
+  assert.ok(argsFor(["ci"], ctx({ env: actor })).args.includes("--registry-user=bob"))
+})
+
+test("a username without a token is not passed: there is nothing to send it with", () => {
+  const args = argsFor(["ci"], ctx({ env: { SHIPKIT_REGISTRY_USER: "shipkit-ci" } })).args
+  assert.ok(!args.some((a: string) => a.startsWith("--registry-user")))
+  assert.ok(!args.some((a: string) => a.startsWith("--registry-token")))
+})
+
 test("a flag never swallows the command after it", () => {
   const opts = parseArgs(["--json", "ci"])
   assert.equal(opts.json, true)
@@ -225,7 +321,7 @@ test("resolves the references in .kamal/secrets from the environment", () => {
     ConnectionStrings__Default: "Host=db;Password=s3cret",
   })
   assert.equal(r.missing, undefined)
-  assert.equal(r.content, "POSTGRES_PASSWORD=s3cret\nConnectionStrings__Default=Host=db;Password=s3cret\n")
+  assert.equal(r.content, "POSTGRES_PASSWORD='s3cret'\nConnectionStrings__Default='Host=db;Password=s3cret'\n")
 })
 
 // The failure this exists to prevent: an empty value is not a value.
@@ -256,9 +352,113 @@ test("comments, blank lines and literal values are left alone", () => {
   const r = expandSecretsFile(file, { REF: "resolved" })
   assert.match(r.content, /^# a note$/m)
   assert.match(r.content, /^LITERAL=kept-as-is$/m)
-  assert.match(r.content, /^REF=resolved$/m)
+  assert.match(r.content, /^REF='resolved'$/m)
 })
 
 test("${BRACED} references resolve too", () => {
-  assert.equal(expandSecretsFile("A=${A}\n", { A: "v" }).content, "A=v\n")
+  assert.equal(expandSecretsFile("A=${A}\n", { A: "v" }).content, "A='v'\n")
+})
+
+// --- which branch ci names for the publish decision (C10) ---
+
+const GH = { GITHUB_ACTIONS: "true" }
+const gitSays = (name: string | undefined) => () => name
+
+test("on GitHub a push names the branch it pushed to", () => {
+  const env = { ...GH, GITHUB_EVENT_NAME: "push", GITHUB_REF: "refs/heads/main", GITHUB_REF_NAME: "main" }
+  assert.equal(publishBranch(env, undefined, gitSays("whatever")), "main")
+})
+
+// The bug: GITHUB_HEAD_REF is the pull request author's branch name. A fork's branch called
+// `main` was reported as `main` and passed the module's publish check.
+test("a pull request from a branch called main is never reported as main", () => {
+  const env = {
+    ...GH,
+    GITHUB_EVENT_NAME: "pull_request",
+    GITHUB_REF: "refs/pull/7/merge",
+    GITHUB_HEAD_REF: "main",
+  }
+  const branch = publishBranch(env, undefined, gitSays("main"))
+  assert.equal(branch, "pull_request:refs/pull/7/merge")
+  assert.notEqual(branch, "main")
+})
+
+test("on a pull request an explicit --branch cannot claim the default branch either", () => {
+  const env = { ...GH, GITHUB_EVENT_NAME: "pull_request", GITHUB_REF: "refs/pull/7/merge" }
+  assert.equal(publishBranch(env, "main", gitSays("main")), "pull_request:refs/pull/7/merge")
+})
+
+test("events other than push never name a branch, even on the default one", () => {
+  for (const event of ["workflow_dispatch", "schedule", "pull_request_target"]) {
+    const env = { ...GH, GITHUB_EVENT_NAME: event, GITHUB_REF: "refs/heads/main" }
+    assert.equal(publishBranch(env, undefined, gitSays("main")), `${event}:refs/heads/main`)
+  }
+})
+
+test("a tag push is not a branch", () => {
+  const env = { ...GH, GITHUB_EVENT_NAME: "push", GITHUB_REF: "refs/tags/v1.0.0" }
+  assert.equal(publishBranch(env, undefined, gitSays("main")), "push:refs/tags/v1.0.0")
+})
+
+test("on GitHub with no event at all, nothing looks like a branch", () => {
+  assert.equal(publishBranch(GH, undefined, gitSays("main")), "unknown-event:unknown-ref")
+})
+
+test("outside GitHub: --branch, else git, else unknown", () => {
+  assert.equal(publishBranch({}, "release", gitSays("main")), "release")
+  assert.equal(publishBranch({}, undefined, gitSays("main")), "main")
+  assert.equal(publishBranch({}, undefined, gitSays(undefined)), undefined)
+})
+
+test("GITHUB_HEAD_REF outside a GitHub run is ignored too", () => {
+  assert.equal(publishBranch({ GITHUB_HEAD_REF: "main" }, undefined, gitSays("feature")), "feature")
+})
+
+test("ci passes the event-derived branch to the module on a pull request", () => {
+  const env = { ...GH, GITHUB_EVENT_NAME: "pull_request", GITHUB_REF: "refs/pull/7/merge", GITHUB_HEAD_REF: "main" }
+  const { args } = argsFor(["ci"], ctx({ env, branch: () => "main" }))
+  assert.ok(args.includes("--branch=pull_request:refs/pull/7/merge"), args.join(" "))
+  assert.ok(!args.includes("--branch=main"))
+})
+
+test("ci passes no --branch when none is known, so the module refuses to publish", () => {
+  const { args } = argsFor(["ci"], ctx({ branch: () => undefined }))
+  assert.ok(!args.some((a: string) => a.startsWith("--branch")), args.join(" "))
+})
+
+test("summary takes --jobs", () => {
+  assert.equal(argsFor(["summary", "reports", "--jobs", "needs.json"]).invalid, undefined)
+})
+
+test("resolved secrets are single-quoted, so Kamal's dotenv neither expands nor runs them", () => {
+  // Kamal parses .kamal/secrets with dotenv and inline command substitution: unquoted, `$rd`
+  // vanished from a password and `$(...)` would have run. Seen on dev-server.
+  const value = `p"w$rd\`x $(touch pwned) \\n #hash`
+  const r = expandSecretsFile("P=$P\n", { P: value })
+  assert.equal(r.content, `P='${value}'\n`)
+})
+
+test("a value with a single quote or a line break is refused, not mangled", () => {
+  assert.deepEqual(expandSecretsFile("A=$A\nB=$B\n", { A: "it's", B: "ok" }).unquotable, ["A"])
+  assert.deepEqual(expandSecretsFile("A=$A\n", { A: "two\nlines" }).unquotable, ["A"])
+  assert.equal(expandSecretsFile("A=$A\n", { A: "it's" }).content, undefined)
+})
+
+test("rollback passes the resolved Kamal secrets, like deploy", () => {
+  // A rollback with empty secrets boots the old image with an empty connection string: /health
+  // answers and the application reaches nothing. Seen on dev-server.
+  const env = { SHIPKIT_SSH_KEY: "/k", SHIPKIT_KAMAL_SECRETS: "POSTGRES_PASSWORD='x'\n" }
+  const args = translate("rollback", { _: ["rollback", "sha-abcdef0"] }, { env, sha: "abc", branch: "main" })
+  assert.ok(args.includes("--kamal-secrets=env:SHIPKIT_KAMAL_SECRETS"), args.join(" "))
+})
+
+test("deploy sends the registry username with the token, like ci", () => {
+  // The plan asks the registry whether this commit's image is published, and that answer is
+  // what lets a merge deploy itself. Under the wrong username a published image reads as
+  // absent: seen against a private registry.
+  const env = { SHIPKIT_SSH_KEY: "/k", SHIPKIT_REGISTRY_TOKEN: "t", SHIPKIT_REGISTRY_USER: "shipkit-ci" }
+  for (const opts of [{ _: ["deploy"], plan: true }, { _: ["deploy"], auto: true }]) {
+    const args = translate("deploy", opts, { env, sha: () => "a".repeat(40), branch: () => "main", dirty: () => false })
+    assert.ok(args.includes("--registry-user=shipkit-ci"), JSON.stringify(opts) + ": " + args.join(" "))
+  }
 })

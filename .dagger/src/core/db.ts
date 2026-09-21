@@ -6,6 +6,7 @@ import type { Loss } from "./schema-snapshot.js"
 import { ShipkitError } from "../errors.js"
 import { dataLoss, destructiveSql, emptyScript, squawkFailed, staleAllowance } from "./gates.js"
 import { PG_IMAGE, PG_PASSWORD, PG_USER, dsnFor, postgresService } from "./postgres.js"
+import { SQUAWK_BASE_IMAGE } from "./images.js"
 import {
   SNAPSHOT_SQL,
   findLosses,
@@ -37,18 +38,18 @@ const SEED_NAME = "seed.sql"
  * The version is pinned. Squawk's rule set changes between releases, and a linter that
  * silently gains or loses a rule changes what the gate means.
  */
-const SQUAWK_BASE = "node:22-slim"
+const SQUAWK_BASE = SQUAWK_BASE_IMAGE
 const SQUAWK_VERSION = "2.65.0"
 
 /**
  * Gate 1 — lint the pending migration SQL.
  *
- * UNVERIFIED: Squawk's JSON reporter flag and output shape have not been observed yet.
- * The M3 checkpoint in docs/v1-plan.md exists to confirm this, and to confirm that Squawk
- * does NOT see statements wrapped in DO $$ blocks (the false-green risk, §7.2).
+ * The JSON reporter flag, its output shape and the exit codes were observed on squawk-cli
+ * 2.65.0 (see parseSquawk). Still UNVERIFIED: that Squawk does NOT see statements wrapped in
+ * DO $$ blocks (the false-green risk, §7.2) — the M3 checkpoint in docs/v1-plan.md.
  */
 export async function lintSql(sql: File, src: Directory): Promise<Finding[]> {
-  const raw = await dag
+  const run = dag
     .container()
     .from(SQUAWK_BASE)
     .withExec(["npm", "install", "-g", `squawk-cli@${SQUAWK_VERSION}`])
@@ -56,11 +57,12 @@ export async function lintSql(sql: File, src: Directory): Promise<Finding[]> {
     .withMountedFile("/work/.squawk.toml", await squawkConfig(src))
     .withExec(
       ["squawk", "--config", "/work/.squawk.toml", "--reporter", "json", "/work/migration.sql"],
-      { expect: ReturnType.Any }, // a non-zero exit is the finding, not an error
+      // A non-zero exit may be the finding, not an error — but it may also be Squawk failing
+      // to run at all. The code and stderr are read so parseSquawk can tell the two apart.
+      { expect: ReturnType.Any },
     )
-    .stdout()
 
-  return parseSquawk(raw)
+  return parseSquawk(await run.stdout(), await run.exitCode(), await run.stderr())
 }
 
 /**

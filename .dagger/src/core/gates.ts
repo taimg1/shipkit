@@ -1,5 +1,6 @@
 import { Finding } from "../report.js"
 import { EXIT, ShipkitError } from "../errors.js"
+import { ALLOW_LOSS_EXAMPLE } from "./sql-scan.js"
 
 /**
  * The four gates of ADR 0004 all fail closed. A gate that logs a warning and continues is
@@ -33,8 +34,9 @@ export const destructiveSql = (findings: Finding[]) =>
   new GateFailure(
     "destructive-sql",
     `migration contains ${findings.length} destructive statement(s) without an intent marker`,
-    'If this is intentional, emit migrationBuilder.Sql("-- shipkit:destructive-ok <reason>") ' +
-      "in the same migration. If it is a renamed property, use RenameColumn instead — EF " +
+    "If this is intentional, name what is lost in the same migration: " +
+      `migrationBuilder.Sql("${ALLOW_LOSS_EXAMPLE}") ` +
+      "(or <table> for a whole table). If it is a renamed property, use RenameColumn instead — EF " +
       "generates DROP + ADD and the data is silently lost.",
     findings,
   )
@@ -107,7 +109,8 @@ export const backupUnverified = (reason: string) =>
   new GateFailure(
     "backup",
     `backup is not verified: ${reason}`,
-    "The migration will not run without a restorable dump. Check the backup job and bucket.",
+    "The migration will not run without a restorable dump stored on the server " +
+      "(/var/backups/shipkit/<service>). Fix what the reason names and deploy again.",
   )
 
 /** Gate 4 — the deployed SHA is not the one answering. */
@@ -117,3 +120,28 @@ export const verifyFailed = (expected: string, got: string | null) =>
     `health check reports version "${got ?? "none"}", expected "${expected}"`,
     "A 200 from the previous container is a failed deploy that looks green. Rolling back.",
   )
+
+/** Gate 4 — the right version is answering and cannot reach its database (C4). */
+export const notReady = (path: string, status: number, version: string) =>
+  new GateFailure(
+    "verify",
+    `version "${version}" is answering but ${path} returned ${status || "nothing"}, not 200`,
+    "The release cannot reach its database: a wrong connection string, a stale password, or a " +
+      "schema it does not expect. Rolling back.",
+  )
+
+/**
+ * Gate 4 failed and so did putting the previous version back (B15).
+ *
+ * Both are reported, the verify failure first: it is why production is in this state. The
+ * rollback's own reason is on its stage entry; this is what the run as a whole says.
+ */
+export const rollbackFailed = (verifyErr: unknown, previous: string, rollbackErr: unknown) => {
+  const why = (e: unknown) => (e instanceof Error ? e.message : String(e))
+  return new GateFailure(
+    "verify",
+    `${why(verifyErr)}; the rollback to ${previous} also failed: ${why(rollbackErr)}`,
+    "Production may be serving the failed release, or nothing. Check /health, then " +
+      `\`shipkit rollback ${previous}\` or redeploy a known-good commit. The database was not rolled back.`,
+  )
+}

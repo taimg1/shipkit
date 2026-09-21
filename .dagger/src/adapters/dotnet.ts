@@ -1,6 +1,6 @@
 import { dag, CacheSharingMode, Container, Directory, File, Service } from "@dagger.io/dagger"
 import { Config } from "../config.js"
-import { infraError } from "../errors.js"
+import { EXIT, ShipkitError, infraError } from "../errors.js"
 import { DbAdapter, StackAdapter, TestSummary } from "./types.js"
 import {
   migrationsAfter,
@@ -155,6 +155,17 @@ class EfCoreDb implements DbAdapter {
       .withExec(["dotnet", "ef", "migrations", "list", "--no-build", ...this.projectArgs(cfg)])
       .stdout()
 
-    return migrationsAfter(parseMigrationList(out), from)
+    const ids = parseMigrationList(out)
+    const pending = migrationsAfter(ids, from)
+    if (pending === null) {
+      throw new ShipkitError(
+        EXIT.GATE,
+        `the migration base ${from} is not one of this commit's ${ids.length} migration(s)`,
+        "The database (or the base branch) has a migration this commit does not contain: it is " +
+          "ahead of this commit, or the histories diverged. Deploy a commit that contains " +
+          `${from}. To put an older release back without touching the schema, use \`shipkit rollback\`.`,
+      )
+    }
+    return pending
   }
 }

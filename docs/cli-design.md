@@ -54,7 +54,7 @@ do, `dagger call` can do; the wrapper only shortens it and normalises the output
 | 1 | a gate said no (lint, test, Squawk, verify) | fix the code — this is not a tool failure |
 | 2 | configuration (no `shipkit.yaml`, invalid, missing secret) | fix the config |
 | 3 | infrastructure (dagger/docker/ssh/registry unreachable) | fix the environment, retry |
-| 4 | confirmation required (`deploy` without `--yes`) | show the plan to the human |
+| 4 | confirmation required (`deploy` without `--yes`, or a plan self-approval refused) | show the plan to the human |
 | 5 | not implemented in this version | — |
 
 Code 5 was added while prototyping: unimplemented stages must fail closed and be
@@ -97,14 +97,16 @@ $ shipkit deploy --plan
   image       sha-a1b2c3d  ←  currently sha-9f8e7d6
   migrations  20260911_AddOrdersIndex
   sql         CREATE INDEX CONCURRENTLY ... (12 lines, no destructive ops)
-  backup      will run first; last verified 2026-09-10 03:00
+  backup      will run first; last verified 9f8e7d6-20260910T030012Z.pgc (2026-09-10T03:00:14Z)
 
   to execute: shipkit deploy --yes=7f3a91c2e004
 ```
 
-The token is a hash over the plan's content — target, image tag, current image tag, the
-migration list, and a digest of the SQL. If anything about the plan changes between showing
-and executing, the token no longer matches and `deploy` refuses.
+The token is a hash over the plan's content — target, image tag, the digest the registry
+serves for that tag, current image tag, what the deploy would provision, the migration list,
+a digest of the SQL, the allow-loss targets in it, and the stages the plan was shown for. If
+anything about the plan changes between showing and executing, the token no longer matches
+and `deploy` refuses.
 
 Consequences:
 
@@ -122,6 +124,32 @@ The intended agent loop:
 
 > user: "deploy" → agent: `deploy --plan`, shows it → user: "ok" → agent:
 > `deploy --yes=<token>` → agent reports the result (and the backup path if a rollback fired).
+
+## Self-approval
+
+A merge to the default branch has nobody to show a plan to. `deploy --auto-approve` lets the
+run make the confirmation itself — for the plans, and only the plans, that nobody would have
+had anything to say about.
+
+The rule lives in `.dagger/src/core/auto-approve.ts`, is pure, and reads nothing but the plan.
+A deploy may approve itself only when all of these hold:
+
+- the pending migrations contain no destructive SQL;
+- they carry no allow-loss marker (a waiver is consent to the loss, not to nobody watching);
+- the deploy provisions nothing on the server;
+- the registry serves an image for this commit's tag;
+- something is already deployed, so a failed `verify` has a version to roll back to;
+- no `--stage` selection — self-approval runs the whole pipeline or it does not run.
+
+Anything else exits 4 with the rendered plan and its token, so a person picks up exactly the
+same deploy with `--yes=<token>`.
+
+Self-approval changes who says yes, never what yes means. Backup, migrate, release, verify,
+rollback and the server-side deploy lock all run exactly as they do for a confirmed deploy,
+and `--auto-approve` is ignored when a token is given — a person already said yes. The run's
+report carries an `approve` stage with the facts the decision was made on (the migration list,
+the image digest, the version it can roll back to), so the entry proves the deploy was
+allowed rather than asserting it.
 
 ## Claude Code integration
 

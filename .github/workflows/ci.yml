@@ -27,6 +27,16 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+# Read-only unless a job says otherwise. Without this every job gets the repository's default
+# token, which on older repositories and organisations is write-all. Only `image` widens it.
+#
+# Every action is pinned by commit SHA, with the version it was at in a comment: a tag can be
+# moved to other code by whoever controls the action's repository, and these steps run next
+# to a token that can write packages. To move a pin, resolve the new tag to its commit
+# (`git ls-remote --tags https://github.com/<owner>/<action>`) and update both.
+permissions:
+  contents: read
+
 jobs:
   # The kit's own tests, not the fixture's. Pure functions only: everything that imports Dagger
   # is exercised by the stage jobs below, against a real project.
@@ -34,8 +44,8 @@ jobs:
     name: Unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
       - run: npm test
@@ -44,14 +54,14 @@ jobs:
     name: Code analysis
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # The full history is needed to resolve the migration diff base against main.
           fetch-depth: 0
       - uses: ./.github/actions/setup
       - working-directory: fixtures/dotnet-api
         run: node ../../bin/shipkit ci --stage=pre --report=../../reports/analysis.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: report-analysis
@@ -62,13 +72,13 @@ jobs:
     name: Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup
       - working-directory: fixtures/dotnet-api
         run: node ../../bin/shipkit ci --stage=test --report=../../reports/tests.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: report-tests
@@ -79,13 +89,13 @@ jobs:
     name: Migrations
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup
       - working-directory: fixtures/dotnet-api
         run: node ../../bin/shipkit ci --stage=db --report=../../reports/migrations.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: report-migrations
@@ -102,15 +112,16 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup
       - working-directory: fixtures/dotnet-api
         env:
-          SHIPKIT_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Only a push has anything to publish; a pull request run is not handed the token at all.
+          SHIPKIT_REGISTRY_TOKEN: ${{ github.event_name == 'push' && secrets.GITHUB_TOKEN || '' }}
         run: node ../../bin/shipkit ci --stage=build,push --report=../../reports/image.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: report-image
@@ -125,9 +136,15 @@ jobs:
     # from exactly the runs that need it.
     if: always()
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: report-*
           path: reports
-      - run: node bin/shipkit summary reports >> "$GITHUB_STEP_SUMMARY"
+      # The jobs' own results go in too. `unit` writes no report, and neither does a job that
+      # failed before the pipeline ran; from reports alone the summary said "ok" on a red run.
+      - env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          printf '%s' "$NEEDS" > "$RUNNER_TEMP/needs.json"
+          node bin/shipkit summary reports --jobs "$RUNNER_TEMP/needs.json" >> "$GITHUB_STEP_SUMMARY"

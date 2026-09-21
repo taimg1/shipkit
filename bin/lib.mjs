@@ -65,12 +65,12 @@ export const COMMAND_OPTIONS = {
   ci: { stage: "value", branch: "value", "migration-base": "value" },
   "db lint": { "migration-base": "value" },
   "db pending": { "migration-base": "value" },
-  deploy: { env: "value", plan: "flag", yes: "value", stage: "value", "ssh-key": "value" },
+  deploy: { env: "value", plan: "flag", yes: "value", auto: "flag", stage: "value", "ssh-key": "value" },
   backup: { env: "value", out: "value", "ssh-key": "value" },
   rollback: { env: "value", "ssh-key": "value" },
   doctor: {},
   // Reads report files and prints markdown. It calls no module, so it takes no module options.
-  summary: { title: "value" },
+  summary: { title: "value", jobs: "value" },
 }
 
 function optionKind(name) {
@@ -118,6 +118,23 @@ export function commandKey(positionals) {
  * Returns undefined when everything is accepted, otherwise `{ code, message }`.
  */
 export function validateOptions(key, opts) {
+  // --plan, --yes and --auto are three different answers to the same question, and letting one
+  // of them win silently means the other was ignored — where one of them is "deploy this
+  // without showing it to anyone". Checked before the loop below, so the combination is
+  // reported as the combination rather than as whatever option happened to be parsed first.
+  if (key === "deploy" && opts.auto !== undefined) {
+    const other = opts.yes !== undefined ? "--yes" : opts.plan !== undefined ? "--plan" : undefined
+    if (other) {
+      return {
+        code: EXIT.CONFIG,
+        message:
+          `--auto and ${other} cannot be given together\n` +
+          "  --auto lets the deploy approve itself when the plan is safe; " +
+          `${other === "--yes" ? "--yes confirms a plan a person has seen" : "--plan changes nothing"}`,
+      }
+    }
+  }
+
   const allowed = { ...GLOBAL_OPTIONS, ...(COMMAND_OPTIONS[key] ?? {}) }
   for (const [name, value] of Object.entries(opts)) {
     if (name === "_" || name === "raw") continue
@@ -143,6 +160,17 @@ export function validateOptions(key, opts) {
     }
   }
   return undefined
+}
+
+/**
+ * Whether this invocation would change production: `deploy --yes=<token>` or `deploy --auto`.
+ *
+ * The guards that run before the module — the dirty working tree, the resolved Kamal secrets —
+ * apply to both. They used to test for `--yes` alone, so adding a second way to execute a
+ * deploy would have walked straight past them.
+ */
+export function executesDeploy(key, opts) {
+  return key === "deploy" && (typeof opts.yes === "string" || opts.auto === true)
 }
 
 /**
@@ -207,6 +235,7 @@ export function isDirty(porcelain) {
  */
 export function expandSecretsFile(text, env) {
   const missing = []
+  const unquotable = []
   const lines = []
 
   for (const raw of text.split("\n")) {
@@ -237,13 +266,57 @@ export function expandSecretsFile(text, env) {
       missing.push(reference[1])
       continue
     }
-    lines.push(`${name}=${resolved}`)
+    // Written single-quoted. Kamal parses this file with dotenv plus its inline command
+    // substitution, so an unquoted `$x` in a value is expanded and `$(...)` is RUN — a password
+    // with a `$` in it silently became another password, and one with `$(...)` a command.
+    // Inside single quotes dotenv takes everything literally, with no escape for a quote or a
+    // line break: a value holding either is refused rather than written in a form Kamal reads
+    // differently. Found on dev-server.
+    if (/['\r\n]/.test(resolved)) {
+      unquotable.push(reference[1])
+      continue
+    }
+    lines.push(`${name}='${resolved}'`)
   }
 
-  return missing.length > 0 ? { missing } : { content: lines.join("\n").replace(/\n+$/, "") + "\n" }
+  if (missing.length > 0) return { missing }
+  if (unquotable.length > 0) return { unquotable }
+  return { content: lines.join("\n").replace(/\n+$/, "") + "\n" }
+}
+
+/**
+ * The branch `ci` names to the module, which publishes only when it is the default branch.
+ *
+ * On GitHub Actions the answer comes from the event, never from a branch name. A pull request's
+ * head branch is chosen by whoever opened it: a fork whose branch is called `main` used to be
+ * reported as `main` and pass the publish check. Only a push names a branch that was actually
+ * pushed to; everything else — pull_request, workflow_dispatch, schedule — is reported as the
+ * event and ref it is, which is never equal to a branch name and so never publishes. An
+ * explicit --branch does not change that: on a pull request it is as much the author's as
+ * GITHUB_HEAD_REF.
+ *
+ * Outside GitHub Actions: --branch, else the checked-out branch from git (`local`), else
+ * undefined — which the module refuses to publish from rather than guessing.
+ */
+export function publishBranch(env, explicit, local) {
+  if (env.GITHUB_ACTIONS === "true") {
+    const ref = env.GITHUB_REF ?? ""
+    if (env.GITHUB_EVENT_NAME !== "push" || !ref.startsWith("refs/heads/")) {
+      return `${env.GITHUB_EVENT_NAME || "unknown-event"}:${ref || "unknown-ref"}`
+    }
+    return explicit || ref.slice("refs/heads/".length)
+  }
+  return explicit || local()
 }
 
 const REGISTRY_TOKEN_VAR = "SHIPKIT_REGISTRY_TOKEN"
+/**
+ * The username sent with that token. GITHUB_ACTOR covers GHCR from Actions and nothing else:
+ * a registry that checks the username refuses a correct token sent as the module's fallback,
+ * and outside Actions there was no way to say who the token belongs to. Not a secret — it is
+ * half of a basic-auth pair, and the half that is printed in `--explain`.
+ */
+const REGISTRY_USER_VAR = "SHIPKIT_REGISTRY_USER"
 const SSH_KEY_VAR = "SHIPKIT_SSH_KEY"
 const DB_URL_VAR = "SHIPKIT_DATABASE_URL"
 const KAMAL_SECRETS_VAR = "SHIPKIT_KAMAL_SECRETS"
@@ -262,7 +335,14 @@ function credentials(opts, env, { dbUrl = false } = {}) {
   // Only the stages that apply migrations take a connection string. Passing it to a function
   // that has no such parameter is an error, not a harmless extra.
   if (dbUrl && env[DB_URL_VAR]) args.push(`--db-url=env:${DB_URL_VAR}`)
-  if (env[REGISTRY_TOKEN_VAR]) args.push(`--registry-token=env:${REGISTRY_TOKEN_VAR}`)
+  if (env[REGISTRY_TOKEN_VAR]) {
+    args.push(`--registry-token=env:${REGISTRY_TOKEN_VAR}`)
+    // The same username `ci` sends. deploy asks the registry too — whether the image for this
+    // commit is published is what lets a merge deploy itself — and a probe under the wrong
+    // username reports a published image as absent.
+    const user = env[REGISTRY_USER_VAR] || env.GITHUB_ACTOR
+    if (user) args.push(`--registry-user=${user}`)
+  }
   // Set by the wrapper from the project's .kamal/secrets, with its references resolved (#19).
   if (env[KAMAL_SECRETS_VAR]) args.push(`--kamal-secrets=env:${KAMAL_SECRETS_VAR}`)
   return args
@@ -290,13 +370,14 @@ export function translate(key, opts, ctx) {
     case "ci": {
       const a = withBase(["ci", ...src, `--sha=${sha()}`, ...(opts.stage ? [`--stage=${opts.stage}`] : [])])
 
-      const branch = opts.branch || ctx.branch()
+      const branch = publishBranch(ctx.env, opts.branch, ctx.branch)
       if (branch) a.push(`--branch=${branch}`)
       if (ctx.dirty()) a.push("--dirty")
 
       if (ctx.env[REGISTRY_TOKEN_VAR]) {
         a.push(`--registry-token=env:${REGISTRY_TOKEN_VAR}`)
-        if (ctx.env.GITHUB_ACTOR) a.push(`--registry-user=${ctx.env.GITHUB_ACTOR}`)
+        const user = ctx.env[REGISTRY_USER_VAR] || ctx.env.GITHUB_ACTOR
+        if (user) a.push(`--registry-user=${user}`)
       }
       return a
     }
@@ -307,16 +388,25 @@ export function translate(key, opts, ctx) {
       return withBase(["db-pending", ...src])
     case "deploy": {
       const target = [...src, `--env=${opts.env || "prod"}`, `--sha=${sha()}`]
-      if (opts.plan) return ["deploy-plan", ...target, ...credentials(opts, ctx.env)]
-      if (typeof opts.yes === "string") {
-        return [
-          "deploy",
-          ...target,
-          ...credentials(opts, ctx.env, { dbUrl: true }),
-          `--plan-token=${opts.yes}`,
-          ...(opts.stage ? [`--stage=${opts.stage}`] : []),
-        ]
-      }
+      // The plan token names the stages (B7), so the plan is built for the same --stage the
+      // deploy will be given.
+      const stage = opts.stage ? [`--stage=${opts.stage}`] : []
+      if (opts.plan) return ["deploy-plan", ...target, ...credentials(opts, ctx.env), ...stage]
+      // Recorded in the server-side deploy lock, so a refused deploy can say who holds it.
+      const actor = ctx.env.GITHUB_ACTOR || ctx.env.USER || ctx.env.USERNAME
+      const execute = (approval) => [
+        "deploy",
+        ...target,
+        ...credentials(opts, ctx.env, { dbUrl: true }),
+        approval,
+        ...stage,
+        ...(actor ? [`--actor=${actor}`] : []),
+      ]
+      // The module decides whether this plan may approve itself, and refuses with exit 4 and the
+      // plan when it may not. The wrapper only says that nobody is waiting at a terminal — it
+      // cannot be the thing that judges a plan safe (ADR 0009).
+      if (opts.auto === true) return execute("--auto-approve=true")
+      if (typeof opts.yes === "string") return execute(`--plan-token=${opts.yes}`)
       return null
     }
     // #11: this case existed and called a module function that did not. The command was
@@ -335,15 +425,17 @@ export function translate(key, opts, ctx) {
         ...credentials(opts, ctx.env),
       ]
     }
+    // The module returns a directory — report.json always, dump.pgc when verified — exported
+    // next to --out, so the dump can be renamed into place without crossing a filesystem.
     case "backup": {
-      const out = opts.out || "prod-backup.pgc"
       return [
         "backup",
         ...src,
         `--env=${opts.env || "prod"}`,
+        `--sha=${sha()}`,
         ...credentials(opts, ctx.env),
         "export",
-        `--path=${out}`,
+        `--path=${backupExportDir(backupOut(opts))}`,
       ]
     }
     case "doctor":
@@ -351,4 +443,40 @@ export function translate(key, opts, ctx) {
     default:
       return undefined
   }
+}
+
+/** Where `shipkit backup` writes the dump. */
+export const backupOut = (opts) => opts.out || "prod-backup.pgc"
+
+/** The directory the module's result is exported into: hidden, beside the dump it becomes. */
+export function backupExportDir(out) {
+  const slash = out.lastIndexOf("/")
+  const dir = slash >= 0 ? out.slice(0, slash + 1) : ""
+  return `${dir}.${out.slice(slash + 1)}.shipkit-export`
+}
+
+/**
+ * Takes the exported backup directory apart: the report, and the dump when the report says it
+ * is good. Returns { report } or { error } — never a report from a directory that has none, and
+ * never a dump the report did not vouch for.
+ *
+ * `fs` is injected so this can be tested without writing a production dump anywhere. The dump is
+ * made owner-only before it gets its final name and never exists there with other permissions.
+ */
+export function collectBackup(dir, out, fs) {
+  let report
+  try {
+    report = JSON.parse(fs.readFileSync(`${dir}/report.json`, "utf8"))
+  } catch {
+    return { error: "the backup produced no readable report" }
+  }
+  if (!report.ok) return { report }
+
+  const dump = `${dir}/dump.pgc`
+  if (!fs.existsSync(dump)) {
+    return { error: "the backup reported success but returned no dump" }
+  }
+  fs.chmodSync(dump, 0o600)
+  fs.renameSync(dump, out)
+  return { report: { ...report, written: out } }
 }

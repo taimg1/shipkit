@@ -4,7 +4,8 @@
 # upgrades, and the deploy user logs in with a key that lives in this repository's working tree. Its
 # only job is to be something Kamal can deploy to over SSH so the deploy pipeline can be
 # built and broken on purpose without paying for a VPS.
-FROM docker:28-dind
+# docker:28-dind, pinned by digest.
+FROM docker:28-dind@sha256:2a232a42256f70d78e3cc5d2b5d6b3276710a0de0596c145f627ecfae90282ac
 
 RUN apk add --no-cache openssh bash curl postgresql17-client
 
@@ -18,7 +19,16 @@ RUN apk add --no-cache openssh bash curl postgresql17-client
 #
 # Alpine's `adduser -D` leaves the account locked ("!"), and sshd refuses locked accounts even
 # for key logins; "*" means "no password" without "locked".
-RUN ssh-keygen -A \
+#
+# The host key is fixed and committed (host-key/), not generated per build: the fixture pins it
+# in shipkit.yaml as hostKey, and the pipeline refuses a server whose key it does not know. A
+# simulated server whose key changed on every rebuild would teach everyone to re-pin without
+# looking, which is the habit the pin exists to break. Only ed25519 is offered, so there is
+# exactly one key to pin. Its private half is public knowledge — one more reason this image is
+# never pointed at anything real.
+COPY host-key/ssh_host_ed25519_key host-key/ssh_host_ed25519_key.pub /etc/ssh/
+RUN chmod 600 /etc/ssh/ssh_host_ed25519_key && chmod 644 /etc/ssh/ssh_host_ed25519_key.pub \
+ && printf '\nHostKey /etc/ssh/ssh_host_ed25519_key\n' >> /etc/ssh/sshd_config \
  && sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config \
  && sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config \
  && (addgroup -S docker 2>/dev/null || true) \
@@ -26,6 +36,9 @@ RUN ssh-keygen -A \
  && addgroup deploy docker \
  && sed -i 's/^deploy:!/deploy:*/' /etc/shadow \
  && mkdir -p /home/deploy/.ssh && chmod 700 /home/deploy/.ssh && chown deploy:deploy /home/deploy/.ssh
+
+# Where every deploy stores its verified pre-deploy dump, as server/bootstrap.sh creates it.
+RUN mkdir -p /var/backups/shipkit && chown deploy:deploy /var/backups/shipkit && chmod 700 /var/backups/shipkit
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

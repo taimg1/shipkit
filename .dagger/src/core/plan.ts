@@ -17,6 +17,7 @@ import { hostKeyHint, sshHostKeyRefusal } from "./known-hosts.js"
 import { execOutput } from "../report.js"
 import { imageTag as tagFor, publishedDigest } from "./publish-gate.js"
 import { newestBackup } from "./backup.js"
+import { DEFAULT_REGISTRY_USER } from "./registry.js"
 
 /** Asks the server what exists on it. An answer the kit cannot read stops the plan. */
 export async function probeServer(cfg: Config, env: Environment, key: Secret): Promise<ServerState> {

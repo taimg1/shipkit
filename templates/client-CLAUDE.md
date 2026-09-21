@@ -13,9 +13,10 @@ less; the reasoning lives in the shipkit repo's docs/adr/ and is read on demand.
 - **Never pass `--yes` without the user approving that exact plan in this conversation.**
   Run `shipkit deploy --plan`, show what it prints, wait for a yes, then pass the token.
   The token proves the plan was displayed; it does not prove anyone agreed to it.
-- **Never run `shipkit deploy --auto`.** It is the merge pipeline's flag: it deploys with no
-  plan shown to anyone, and it is in the workflow for the case where there is nobody to show
-  it to. In a conversation there is — use `--plan`.
+- **Never run `shipkit deploy --auto`.** It is the flag for an unattended pipeline: it deploys
+  with no plan shown to anyone, for the case where there is nobody to show it to. In a
+  conversation there is — use `--plan`. The ci workflow does not deploy; a release is someone
+  reading a plan and passing its token.
 - Tag images with the commit SHA. Never `latest`.
 
 ## Database

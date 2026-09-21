@@ -31,7 +31,8 @@ case where it should not — see [A private package](#a-private-package).
    when they disagree the deploy fails at its first step, before anything on the server
    changes, with Kamal unable to find the image.
 
-2. **`packages: write` on the job that runs `shipkit ci`.** `templates/github/ci.yml` has it:
+2. **`packages: write` on the `Image` job, and on no other.** That is the job that runs
+   `shipkit ci --stage=build,push`; `templates/github/ci.yml` has it:
 
    ```yaml
    permissions:
@@ -40,7 +41,9 @@ case where it should not — see [A private package](#a-private-package).
    ```
 
    Repository-wide `permissions: contents: read` at the top of the file, widened on that one
-   job. No PAT is needed to *publish* to a package owned by the same account as the repo.
+   job. The analysis, test and migration jobs run the same code against the same commit and
+   have nothing to publish, so a compromised action in one of them has no token to publish
+   with. No PAT is needed to *publish* to a package owned by the same account as the repo.
 
 3. **The token, only on the runs that may publish.**
 
@@ -92,10 +95,11 @@ Pick one, in this order:
 
 1. **A read-only credential for the server.** A PAT (classic) with `read:packages` and nothing
    else, ideally on a machine account that has read access to the package. Put it in the CI
-   secret store, pass it as `SHIPKIT_REGISTRY_TOKEN` to the *deploy* workflow, and set
-   `registry.username` in `config/deploy.yml` to that account. The pipeline then publishes with
-   one credential and the server pulls with another, which is what you want anyway: the machine
-   in production has no token that can write to the registry.
+   secret store, pass it as `SHIPKIT_REGISTRY_TOKEN` to whatever runs `shipkit deploy` — a
+   terminal today, since no client template has a deploy job — and set `registry.username` in
+   `config/deploy.yml` to that account. The pipeline then publishes with one credential and the
+   server pulls with another, which is what you want anyway: the machine in production has no
+   token that can write to the registry.
 
    ```yaml
    registry:
@@ -107,8 +111,9 @@ Pick one, in this order:
 
 2. **Give the repository access to the package** and keep using `GITHUB_TOKEN`: on GitHub,
    Package → Package settings → *Manage Actions access* → add the repository with the **Read**
-   role, and give the deploy job `permissions: packages: read`. Enough for the deploy itself;
-   the expiring credential on the server stays a fact.
+   role. Enough for the deploy itself; the expiring credential on the server stays a fact. A
+   workflow that ever runs `shipkit deploy` needs `permissions: packages: read` on that job —
+   it reads the image ci published, it never writes one.
 
 3. **Make the package public.** Only when the image contains nothing that is not already
    public — it is the application, its dependencies and whatever the Dockerfile copied in.

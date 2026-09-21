@@ -52,7 +52,13 @@ test("images outside the module are pinned by digest too", () => {
 
 // C9: a tag on an action can be moved to other code; these steps run beside a write token.
 test("every action in the workflows is pinned by commit, with its version beside it", () => {
-  const files = [".github/workflows/ci.yml", ".github/actions/setup/action.yml", "templates/github/ci.yml"]
+  const files = [
+    ".github/workflows/ci.yml",
+    ".github/actions/setup/action.yml",
+    "templates/github/ci.yml",
+    "templates/github/ci-no-db.yml",
+    "templates/github/actions/setup/action.yml",
+  ]
   for (const file of files) {
     const code = readFileSync(file, "utf8")
       .split("\n")
@@ -67,13 +73,13 @@ test("every action in the workflows is pinned by commit, with its version beside
 })
 
 test("both workflows default the token to read-only", () => {
-  for (const file of [".github/workflows/ci.yml", "templates/github/ci.yml"]) {
+  for (const file of [".github/workflows/ci.yml", "templates/github/ci.yml", "templates/github/ci-no-db.yml"]) {
     assert.match(readFileSync(file, "utf8"), /^permissions:\n  contents: read$/m, file)
   }
 })
 
 test("Dagger is installed from an archive checked against a pinned sha256", () => {
-  for (const file of [".github/actions/setup/action.yml", "templates/github/ci.yml"]) {
+  for (const file of [".github/actions/setup/action.yml", "templates/github/actions/setup/action.yml"]) {
     const text = readFileSync(file, "utf8")
     assert.match(text, /[0-9a-f]{64}/, file)
     assert.match(text, /sha256sum -c -/, file)

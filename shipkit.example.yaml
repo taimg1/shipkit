@@ -58,6 +58,13 @@ defaultBranch: main
 # Set to false for a project that never publishes an image (a fixture, a library).
 # true needs `packages: write` and SHIPKIT_REGISTRY_TOKEN in the ci workflow — both are in
 # templates/github/ci.yml; with false, delete them there.
+# Extra build arguments, for a stack that needs configuration while the image is built —
+# Next inlines NEXT_PUBLIC_* into the browser bundle during `next build`, so they cannot be
+# supplied at run time. Written here rather than in the workflow because the image tag is the
+# commit: one commit must mean one image. Public by construction; secrets never go here.
+# buildArgs:
+#   NEXT_PUBLIC_SITE_URL: https://example.com
+
 publish: true
 
 # /health must return {"status":"ok","version":"<sha>"}.

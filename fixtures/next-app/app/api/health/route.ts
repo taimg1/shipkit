@@ -14,5 +14,5 @@ import { healthPayload } from "@/lib/health"
 export const dynamic = "force-dynamic"
 
 export function GET() {
-  return NextResponse.json(healthPayload(process.env.GIT_SHA))
+  return NextResponse.json(healthPayload(process.env.GIT_SHA, process.env.NEXT_PUBLIC_FIXTURE_LABEL))
 }

@@ -200,6 +200,13 @@ Next.js is the odd one out: it may have no database, and it may not need a serve
 - **Pure static** (`output: 'export'`) → `delivery: static`. `ci` runs unchanged; `deploy`
   becomes "upload the export". Free tiers of static hosts frequently forbid commercial use
   (`ci-cd-plan.md` §11) — this is the one place where a paid tier is likely unavoidable.
+- **Build-time configuration.** `NEXT_PUBLIC_*` is inlined into the browser bundle by
+  `next build`, so it cannot be supplied at run time the way a server variable can. It goes in
+  `buildArgs:` in shipkit.yaml, which the kit passes to the image build alongside `GIT_SHA`.
+  In shipkit.yaml rather than in the workflow on purpose: the image tag is the commit, so one
+  commit has to mean one image, and a value that varied per run would quietly break that.
+  These values are public by construction — they ship in the bundle — and secrets never go
+  there (ADR 0006).
 - `pre` for Next/Nest: `eslint --max-warnings 0`, or `biome ci` if the project uses Biome.
   Which one is `lint:` in `shipkit.yaml` — required for these stacks, and the adapter does not
   guess. `tsc --noEmit` runs after it either way: a type error is a build failure, and without

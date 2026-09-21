@@ -102,7 +102,11 @@ function buildImage(source: Directory, cfg: Config, sha: string): Container {
   const built = source.dockerBuild({
     dockerfile: cfg.dockerfile,
     platform: platform as Platform,
-    buildArgs: [{ name: "GIT_SHA", value: sha }],
+    // GIT_SHA first so a project cannot shadow it; config refuses it anyway (config.ts).
+    buildArgs: [
+      { name: "GIT_SHA", value: sha },
+      ...Object.entries(cfg.buildArgs).map(([name, value]) => ({ name, value })),
+    ],
   })
   // Kamal refuses an image without this label, and only labels images it built itself.
   // Found the hard way: "Image ... is missing the 'service' label".

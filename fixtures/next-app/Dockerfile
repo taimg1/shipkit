@@ -18,7 +18,9 @@ COPY . .
 # build, and /api/health reports it: `verify` compares that against the SHA it just deployed,
 # so a stale container cannot pass as a successful release.
 ARG GIT_SHA=dev
+ARG NEXT_PUBLIC_FIXTURE_LABEL=
 ENV GIT_SHA=$GIT_SHA \
+    NEXT_PUBLIC_FIXTURE_LABEL=$NEXT_PUBLIC_FIXTURE_LABEL \
     NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 

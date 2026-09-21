@@ -37,3 +37,8 @@ publish: false
 # Under /api so Next's middleware conventions leave it alone. It reports the commit the image
 # was built from — the whole point of gate 4 (docs/multi-stack-plan.md §5).
 health: /api/health
+
+# Proves the build arguments a Next project needs reach `next build`: the fixture's health
+# payload reports this one back, so a build that dropped it fails the test rather than the eye.
+buildArgs:
+  NEXT_PUBLIC_FIXTURE_LABEL: shipkit-fixture

@@ -13,7 +13,13 @@ const nextConfig: NextConfig = {
    * GIT_SHA in the container — so without this the /health version would be empty in exactly
    * the place `verify` looks at it.
    */
-  env: { GIT_SHA: process.env.GIT_SHA ?? "dev" },
+  env: {
+    GIT_SHA: process.env.GIT_SHA ?? "dev",
+    // The same mechanism a real Next project needs for NEXT_PUBLIC_*: a value that exists
+    // only while the image is built. The fixture reports it back so that a build which lost
+    // it fails a test instead of being noticed in a browser.
+    NEXT_PUBLIC_FIXTURE_LABEL: process.env.NEXT_PUBLIC_FIXTURE_LABEL ?? "",
+  },
 
   /** Nothing to gain from telling every visitor which framework serves them. */
   poweredByHeader: false,

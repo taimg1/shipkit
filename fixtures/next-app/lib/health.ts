@@ -5,6 +5,8 @@
 export interface HealthPayload {
   status: "ok"
   version: string
+  /** The buildArgs value from shipkit.yaml, echoed so the build cannot lose it unnoticed. */
+  label: string
 }
 
 /**
@@ -14,6 +16,6 @@ export interface HealthPayload {
  * compares this value against the SHA it just deployed (core/health.ts), so "dev" fails that
  * comparison loudly instead of letting an unidentified container count as the release.
  */
-export function healthPayload(sha: string | undefined): HealthPayload {
-  return { status: "ok", version: sha && sha.length > 0 ? sha : "dev" }
+export function healthPayload(sha: string | undefined, label = ""): HealthPayload {
+  return { status: "ok", version: sha && sha.length > 0 ? sha : "dev", label }
 }

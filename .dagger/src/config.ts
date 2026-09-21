@@ -3,6 +3,7 @@ import { parse } from "yaml"
 import { configError } from "./errors.js"
 import { hostKeyHint, parseKnownHosts } from "./core/known-hosts.js"
 import { configProblem } from "./config-validate.js"
+import { parseBuildArgs } from "./build-args.js"
 import { stackConfigProblem, stackRequirements, stackVersionText } from "./adapters/requirements.js"
 import { parseRetention } from "./core/backup-store.js"
 import { DEFAULT_MIGRATION_TIMEOUTS, MigrationTimeouts, pgDuration } from "./core/migrate-options.js"
@@ -84,6 +85,18 @@ export interface Config {
    */
   targetArch: string
   /**
+   * Extra `--build-arg` values for the image build, from `buildArgs:` in shipkit.yaml.
+   *
+   * Next inlines NEXT_PUBLIC_* into the browser bundle at build time, so a site needs its
+   * public configuration during `build` and not at run time. It lives in shipkit.yaml rather
+   * than in the workflow because the image tag is the commit: two builds of one commit must
+   * produce one image, and a value that varies per run would quietly break that.
+   *
+   * Public by construction — a build argument ends up in the image and, for Next, in the
+   * bundle every visitor downloads. Secrets do not go here (ADR 0006).
+   */
+  buildArgs: Record<string, string>
+  /**
    * How many verified pre-deploy dumps to keep on the server, per service. Older ones are
    * deleted after each new one is stored. Default 10.
    */
@@ -124,6 +137,13 @@ const STACKS: StackName[] = ["dotnet", "nest", "next", "custom"]
  * a misconfiguration must fail as a message, never as a stack trace, and never as a
  * silently applied default.
  */
+/** parseBuildArgs, as a throw: everything in this file reports a config problem that way. */
+function buildArgsOrThrow(raw: unknown): Record<string, string> {
+  const parsed = parseBuildArgs(raw)
+  if (!parsed.ok) throw configError(parsed.message, parsed.next)
+  return parsed.args
+}
+
 export async function loadConfig(source: Directory): Promise<Config> {
   let raw: string
   try {
@@ -257,6 +277,7 @@ export async function loadConfig(source: Directory): Promise<Config> {
     stackVersion:
       c.stackVersion === undefined ? requirements.version.fallback : stackVersionText(c.stackVersion),
     targetArch: (c.targetArch as string) ?? "linux-x64",
+    buildArgs: buildArgsOrThrow(c.buildArgs),
     defaultBranch: (c.defaultBranch as string) ?? "main",
     publish: c.publish === undefined ? true : c.publish === true,
     backupRetention: retention.value,

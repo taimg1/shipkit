@@ -1,42 +1,18 @@
-# Copy to .github/workflows/ci.yml in a client repository, together with
-# templates/github/actions/setup/action.yml → .github/actions/setup/action.yml, which every job
-# below uses. A project with no database (`db: none` in shipkit.yaml) copies `ci-no-db.yml`
-# instead: the same file without the Migrations job.
+# The no-database variant: copy this to .github/workflows/ci.yml in a client repository whose
+# shipkit.yaml says `db: none` — a Next.js site, a worker, anything that owns no schema —
+# together with templates/github/actions/setup/action.yml → .github/actions/setup/action.yml.
 #
-# ADR 0001 says this file is a checkout and one call. It is still true per job: every job below
-# is a checkout, the setup action and one `shipkit ci --stage=...` (amendment, 2026-09-17).
+# It is `ci.yml` without the Migrations job and without its two `needs:` entries, and nothing
+# else. A test in the kit (tests/client-workflow.test.ts) compares the two files line by line so
+# the pair cannot drift; when you change one, change the other.
 #
-# One job used to run the whole pipeline, and the run page showed a single box that was either
-# green or red. Which stage failed, how long each took, and what a gate actually said all lived
-# in a log you had to open and scroll. One job per stage puts that on the graph. Nothing moved
-# into YAML: which stages exist, what they do and whether they passed are all still the module's.
+# Why a separate file rather than a note saying "delete the Migrations job": the deletion is
+# three edits in three places, and the one that is easy to get wrong is silent. A `db: none`
+# project that keeps the job gets a green "skipped: db=none" box on every run — a run that looks
+# like it checked the migrations of a project that has none.
 #
-# The cost is real and worth stating: each job is a fresh runner with a cold Dagger cache, so
-# the total machine time goes up. The three checks run in parallel, which buys most of the wall
-# clock back.
-#
-# `build` and `push` share the built container in memory, so they stay in one job. Split across
-# runners, `push` finds no image and skips itself — a green run that published nothing. That is
-# what `--stage=build,push` exists for.
-#
-# No deploy job. This workflow checks a commit and publishes its image; releasing it is a
-# separate, deliberate act — `shipkit deploy --plan`, read it, then `shipkit deploy --yes=<token>`
-# (docs/runbooks/deploy.md).
-#
-# What changes per stack: nothing in this file. Every job is `shipkit ci --stage=...`, and what
-# a stage does comes from shipkit.yaml — `stack:` picks the adapter that owns the lint command,
-# the Dockerfile and the test runner; `db: none` means there is no Migrations job at all (use
-# ci-no-db.yml); `publish: false` means the Image job needs neither `packages: write` nor
-# SHIPKIT_REGISTRY_TOKEN, so delete both; `targetArch:` other than the runner's needs `qemu:`
-# on the setup step of the Image job. The commands themselves are never written here.
-#
-# Every action is pinned by commit SHA, with the version it was at in a comment: a tag can be
-# moved to other code by whoever controls the action's repository, and these steps run next to a
-# token that can write packages. The versions are the first majors whose `action.yml` declares
-# `using: node24`, or later — the runner warns on, and eventually stops running, node20 actions.
-# To move a pin, resolve the new tag to its commit
-# (`git ls-remote --tags https://github.com/<owner>/<action>`), read the `runs.using:` in that
-# action's action.yml at that commit, and update the SHA and the comment together.
+# Everything else about this workflow is ci.yml's, including why there is no deploy job and what
+# a client changes per stack. Read the header there.
 name: ci
 
 on:
@@ -63,9 +39,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The full history, in every job: the migration diff base is the merge base with the
-          # default branch, and on a pull request the wrapper reads the head commit as `HEAD^2`.
-          # A shallow clone has neither, and the stage that needs one fails on the runner only.
+          # The full history, in every job: on a pull request the wrapper reads the head commit
+          # as `HEAD^2`, and a shallow clone does not have it. The build would then be tagged
+          # with the merge commit, which is a SHA `/health` will never report.
           fetch-depth: 0
       - uses: ./.github/actions/setup
       - run: node "$SHIPKIT" ci --stage=pre --report=reports/analysis.json
@@ -94,36 +70,17 @@ jobs:
           path: reports/tests.json
           if-no-files-found: warn
 
-  # Squawk on the pending SQL, then the migrations applied to a seeded copy of the schema and
-  # the rows counted. Delete this job on a project with `db: none` — or rather, copy ci-no-db.yml,
-  # which is this file with the job and its two `needs:` entries already gone.
-  migrations:
-    name: Migrations
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - uses: ./.github/actions/setup
-      - run: node "$SHIPKIT" ci --stage=db --report=reports/migrations.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always()
-        with:
-          name: report-migrations
-          path: reports/migrations.json
-          if-no-files-found: warn
-
   # Last, and only if the checks passed: an image nothing vouched for has no reason to exist,
   # and on the default branch this job is what publishes.
   image:
     name: Image
     runs-on: ubuntu-latest
-    needs: [analysis, tests, migrations]
+    needs: [analysis, tests]
     permissions:
       contents: read
       # Needed because shipkit.yaml says `publish: true`: the push stage uploads the image with
       # this job's GITHUB_TOKEN, so no PAT is involved. It is on this job and no other — the
-      # three jobs above run the same code against the same commit and have nothing to publish.
+      # jobs above run the same code against the same commit and have nothing to publish.
       packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -149,7 +106,7 @@ jobs:
   summary:
     name: CI summary
     runs-on: ubuntu-latest
-    needs: [analysis, tests, migrations, image]
+    needs: [analysis, tests, image]
     # The summary exists for the runs that failed. Skipping it when a job fails would remove it
     # from exactly the runs that need it.
     if: always()

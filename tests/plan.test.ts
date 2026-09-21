@@ -9,6 +9,7 @@ const base = {
   currentImageTag: "sha-9f8e7d6",
   servingVersion: null,
   provision: [] as string[],
+  hasDb: true,
   migrations: ["20260911_AddOrdersIndex"],
   sqlDigest: "abc123",
   sqlPreview: "12 lines",

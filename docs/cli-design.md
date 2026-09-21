@@ -102,11 +102,25 @@ $ shipkit deploy --plan
   to execute: shipkit deploy --yes=7f3a91c2e004
 ```
 
+A project with `db: none` has no migration list, no SQL and no backup to show, so the plan
+names the stages that will not run instead of printing three lines that say "none":
+
+```
+$ shipkit deploy --plan
+  target      prod  (easytransfer.com.ua)
+  image       sha-a1b2c3d  ←  currently sha-9f8e7d6
+  database    none  (backup and migrate are skipped)
+
+  to execute: shipkit deploy --yes=4c81ba90f2d7
+```
+
 The token is a hash over the plan's content — target, image tag, the digest the registry
-serves for that tag, current image tag, what the deploy would provision, the migration list,
-a digest of the SQL, the allow-loss targets in it, and the stages the plan was shown for. If
-anything about the plan changes between showing and executing, the token no longer matches
-and `deploy` refuses.
+serves for that tag, current image tag, what the deploy would provision, whether the project
+has a database, the migration list, a digest of the SQL, the allow-loss targets in it, and the
+stages the plan was shown for. If anything about the plan changes between showing and
+executing, the token no longer matches and `deploy` refuses. A database is in there because it
+is what makes `backup` and `migrate` run: with nothing pending on either side, a plan shown
+for a deploy that dumps production first would otherwise hash the same as one that does not.
 
 Consequences:
 
@@ -145,11 +159,12 @@ Anything else exits 4 with the rendered plan and its token, so a person picks up
 same deploy with `--yes=<token>`.
 
 Self-approval changes who says yes, never what yes means. Backup, migrate, release, verify,
-rollback and the server-side deploy lock all run exactly as they do for a confirmed deploy,
-and `--auto-approve` is ignored when a token is given — a person already said yes. The run's
-report carries an `approve` stage with the facts the decision was made on (the migration list,
-the image digest, the version it can roll back to), so the entry proves the deploy was
-allowed rather than asserting it.
+rollback and the server-side deploy lock all run exactly as they do for a confirmed deploy —
+and a project with `db: none`, which runs neither `backup` nor `migrate`, still has to clear
+every one of the reasons above — and `--auto-approve` is ignored when a token is given: a
+person already said yes. The run's report carries an `approve` stage with the facts the
+decision was made on (the migration list, the image digest, the version it can roll back to),
+so the entry proves the deploy was allowed rather than asserting it.
 
 ## Claude Code integration
 

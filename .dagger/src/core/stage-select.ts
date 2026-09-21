@@ -59,6 +59,36 @@ export function selectedStages(selection: StageSelection, known: string[]): stri
 }
 
 /**
+ * Deploy stages that exist only because the project has a database.
+ *
+ * `backup` used to run whatever the project was, so a `db: none` deploy died in its first
+ * stage trying to pg_dump a container that is not there.
+ */
+export const DB_ONLY_STAGES = ["backup", "migrate"]
+
+/**
+ * Why a deploy stage does not run, or null when it does — as the report's skip reason.
+ *
+ * One rule for both reasons a deploy stage is passed over, so the plan and the report cannot
+ * end up disagreeing about which stages a project with no database runs. Neither reason is a
+ * silent omission: a stage that does not run says so and says why, because a gate nobody can
+ * see in the report has stopped being a gate (ADR 0004).
+ *
+ * `db` is the project's database as the report should name it — "none" when the stack adapter
+ * implements none, whatever shipkit.yaml says otherwise.
+ */
+export function deployStageSkip(
+  selection: StageSelection,
+  name: string,
+  db: string,
+): string | null {
+  // What was asked for first: "not selected" is the more specific answer when both apply.
+  if (!stageRuns(selection, name)) return "not selected"
+  if (db === "none" && DB_ONLY_STAGES.includes(name)) return `db=${db}`
+  return null
+}
+
+/**
  * Why a deploy stage set is unsafe to run, or null when it is not.
  *
  * A valid token used to authorise any subset of the plan: `--stage=release` shipped new code

@@ -17,6 +17,7 @@ const safe: DeployPlan = {
   currentImageTag: "sha-9f8e7d6",
   servingVersion: "9f8e7d6",
   provision: [],
+  hasDb: true,
   migrations: ["20260911_AddOrdersIndex"],
   sqlDigest: "abc123",
   sqlPreview: "12 lines",

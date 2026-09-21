@@ -152,6 +152,7 @@ export async function buildPlan(
     currentImageTag,
     servingVersion,
     provision: provision.steps,
+    hasDb: needsDb,
     migrations,
     sqlDigest: digest(sqlText),
     sqlPreview:

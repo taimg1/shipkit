@@ -3,7 +3,8 @@
 ```bash
 export SHIPKIT_SSH_KEY=path/to/deploy_key
 # Only when the deploy has migrations to apply; the plan says how many. A release with
-# nothing pending never opens that connection and does not ask for it.
+# nothing pending never opens that connection and does not ask for it, and a project with
+# db: none never has any.
 export SHIPKIT_DATABASE_URL="Host=...;Database=...;Username=...;Password=..."
 
 shipkit deploy --plan          # shows what would happen; changes nothing
@@ -48,6 +49,10 @@ the token says, because they skip a gate:
 - `release` without `verify` — nothing would check the new version, and nothing would roll it back;
 - `release` without `migrate` while migrations are pending — new code on the old schema;
 - `migrate` without `backup` while migrations are pending.
+
+The first applies to every project. The last two are about migrations that are pending, so
+they never fire for a project with `db: none` — and equally never fire for a database project
+with nothing to apply.
 
 ## The automatic path
 
@@ -106,9 +111,10 @@ deploy that stopped for confirmation never started.
 `provision` (only when the plan says so) → `backup` → `migrate` → `release` → `verify` →
 `rollback` (only if verify fails) → `clean`.
 
-`verify` passes only when `/health` reports the SHA just deployed **and** the readiness path
-(`ready:` in shipkit.yaml) answers 200 — the new release can reach its database. It retries
-both for up to `verifyTimeout` seconds (default 60) before failing.
+`verify` passes only when `/health` reports the SHA just deployed — and, for a project with a
+database, only when the readiness path (`ready:` in shipkit.yaml) answers 200 as well, proving
+the new release can reach it. `ready:` is required for those projects and has no default. It
+retries for up to `verifyTimeout` seconds (default 60) before failing.
 
 `--stage` selects a subset. `rollback` cannot be selected — it only ever follows a failed
 verify; use `shipkit rollback` instead. A plan that provisions the server refuses a selection
@@ -126,8 +132,9 @@ Before any of them, and before anything on the server changes:
    wrong sha) stops the deploy here, before the backup and the migrations, rather than at
    `release` with production already on the new schema.
 
-`backup` dumps production, restores the dump into a scratch database (it must restore without
-an error and with every table production has), and stores it on the server as
+`backup`, for a project that has a database, dumps production, restores the dump into a
+scratch database (it must restore without an error and with every table production has), and
+stores it on the server as
 `/var/backups/shipkit/<service>/<sha>-<UTC timestamp>.pgc` (mode 0600), keeping the newest
 `backupRetention` (default 10). The stage's report entry has the `path` and `sha256`. If the
 dump cannot be verified or stored, the stage fails and `migrate` does not run. Restoring from it:
@@ -140,6 +147,21 @@ forward, and `restore.md` covers the rest.
 
 `migrate` runs the bundle with `lock_timeout` and `statement_timeout` set (`migrations:` in
 `shipkit.yaml`, default 5s / 15min); see add-a-migration.md.
+
+### A project with no database
+
+`db: none` in `shipkit.yaml` — an SSR Next.js site, say — runs the same pipeline without
+`backup` and `migrate`. They are not left out of it: the report carries both stages as
+`skipped` with the reason `db=none`, and `deploy --plan` prints one `database` line saying so
+where the migration list, the SQL and the backup would be. A stage nobody can see in the
+report has stopped being a gate (ADR 0004), and that is as true of one that had nothing to do.
+
+Nothing else changes, and nothing else relaxes. The deploy lock is taken, the image must be
+published and pullable before anything on the server moves, provisioning still starts
+kamal-proxy (it is never offered a database accessory), `verify` still refuses a 200 from the
+old container, a failed `verify` still rolls back, and `--auto` still refuses a first deploy,
+a missing image, a `--stage` selection or anything to provision. `ready:` is optional for
+these projects only because there is no database for readiness to prove.
 
 ## A deploy lock that was left behind
 

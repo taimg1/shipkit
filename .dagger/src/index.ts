@@ -18,7 +18,7 @@ import { backup as backupProduction, BackupResult } from "./core/backup.js"
 import { migrate as runMigrations } from "./core/migrate.js"
 import { lastApplied } from "./core/history.js"
 import { dockerPlatform, SUPPORTED_RIDS } from "./core/platform.js"
-import { deploySelectionProblem, deployStageProblem, parseStages, selectedStages, stageRuns } from "./core/stage-select.js"
+import { deploySelectionProblem, deployStageProblem, deployStageSkip, parseStages, selectedStages, stageRuns } from "./core/stage-select.js"
 import { imageTag, publishDecision, publishedDigest } from "./core/publish-gate.js"
 import { versionMatchesTag } from "./core/health.js"
 import { parseRetainContainers } from "./core/server-probe.js"
@@ -437,6 +437,11 @@ export class Shipkit {
         )
       }
 
+      // What the report calls this project's database. An adapter with no `db` is the same
+      // absence as `db: none` — a stack that has no migrations to apply and no dump to take —
+      // and every db-shaped stage below reads this one value rather than asking twice.
+      const dbKind = adapter.db ? cfg.db : "none"
+
       const stages = parseStages(stage, DEPLOY_STAGES)
       if (stages.unknown.length > 0) throw unknownStage(stages.unknown, DEPLOY_STAGES)
       // Before the plan token is asked for: `--stage=rollback` used to demand one and then run
@@ -560,7 +565,12 @@ export class Shipkit {
       } else r.skip("provision", only("provision") ? "server already provisioned" : "not selected")
 
       let backupResult: BackupResult | null = null
-      if (only("backup")) {
+      const skipBackup = deployStageSkip(stages, "backup", dbKind)
+      if (skipBackup) {
+        // Skipped explicitly and visibly, exactly as ci's db stage is: this used to run
+        // whatever the project was and pg_dump a container a db=none project never has.
+        r.skip("backup", skipBackup)
+      } else {
         // The dump is stored on the server inside this stage; if it cannot be, the stage fails
         // and migrate never runs.
         backupResult = await r.stage("backup", async () => {
@@ -571,33 +581,32 @@ export class Shipkit {
           })
           return withDetail(result, { backup: result })
         })
-      } else r.skip("backup", "not selected")
+      }
 
-      if (only("migrate")) {
-        if (cfg.db === "none" || !adapter.db) {
-          r.skip("migrate", `db=${cfg.db}`)
-        } else {
-          await r.stage("migrate", async () => {
-            const from = await lastApplied(target, adapter.db!, sshKey)
-            const pending = await adapter.db!.pendingList(source, cfg, from)
-            // Asked for here rather than before the stage: a code-only release applies nothing,
-            // and refusing it for a credential it will never use is a gate firing at the wrong
-            // deploy. Pending migrations and no connection string is still a refusal — and the
-            // count comes from the server, now, not from the plan.
-            if (!dbUrl && pending.length > 0) {
-              throw new ShipkitError(
-                EXIT.CONFIG,
-                `migrate needs the production connection string for ${pending.length} pending migration(s)`,
-                "Pass --db-url=env:SHIPKIT_DATABASE_URL.",
-              )
-            }
-            const result = dbUrl
-              ? await runMigrations(source, cfg, target, adapter.db!, sshKey, dbUrl, pending, backupResult)
-              : { applied: [], from }
-            return withDetail(result, { from, applied: result.applied, timeouts: cfg.migrationTimeouts })
-          })
-        }
-      } else r.skip("migrate", "not selected")
+      const skipMigrate = deployStageSkip(stages, "migrate", dbKind)
+      if (skipMigrate) {
+        r.skip("migrate", skipMigrate)
+      } else {
+        await r.stage("migrate", async () => {
+          const from = await lastApplied(target, adapter.db!, sshKey)
+          const pending = await adapter.db!.pendingList(source, cfg, from)
+          // Asked for here rather than before the stage: a code-only release applies nothing,
+          // and refusing it for a credential it will never use is a gate firing at the wrong
+          // deploy. Pending migrations and no connection string is still a refusal — and the
+          // count comes from the server, now, not from the plan.
+          if (!dbUrl && pending.length > 0) {
+            throw new ShipkitError(
+              EXIT.CONFIG,
+              `migrate needs the production connection string for ${pending.length} pending migration(s)`,
+              "Pass --db-url=env:SHIPKIT_DATABASE_URL.",
+            )
+          }
+          const result = dbUrl
+            ? await runMigrations(source, cfg, target, adapter.db!, sshKey, dbUrl, pending, backupResult)
+            : { applied: [], from }
+          return withDetail(result, { from, applied: result.applied, timeouts: cfg.migrationTimeouts })
+        })
+      }
 
       if (only("release")) {
         await r.stage("release", async () => {
@@ -639,8 +648,15 @@ export class Shipkit {
                 return withDetail(to, {
                   rolledBackTo: to,
                   verified: back,
-                  note: "the database was not rolled back; migrations roll forward",
-                  backup: backupResult,
+                  // What was and was not put back. A project with no database has neither to
+                  // report, and a note about migrations rolling forward would be the report
+                  // describing something this deploy does not have.
+                  ...(dbKind === "none"
+                    ? {}
+                    : {
+                        note: "the database was not rolled back; migrations roll forward",
+                        backup: backupResult,
+                      }),
                 })
               })
             } catch (rollbackErr) {
@@ -726,12 +742,21 @@ export class Shipkit {
     let dump: File | undefined
     let report: string
     try {
-      const { cfg, target } = await resolveTarget(source, env)
+      const { cfg, adapter, target } = await resolveTarget(source, env)
       if (!sshKey) {
         throw new ShipkitError(
           EXIT.CONFIG,
           "backup needs an SSH key for the target",
           "Pass --ssh-key=file:<path> or set SHIPKIT_SSH_KEY.",
+        )
+      }
+      // The deploy skips its backup stage for these projects; asked for one directly, say so
+      // rather than fail inside pg_dump against a container that was never there.
+      if (cfg.db === "none" || !adapter.db) {
+        throw new ShipkitError(
+          EXIT.CONFIG,
+          `this project has no database to back up (db=${cfg.db})`,
+          "Nothing on this server holds data the kit put there.",
         )
       }
 
@@ -790,7 +815,7 @@ export class Shipkit {
   ): Promise<string> {
     const r = new ReportBuilder("rollback", toVersion)
     try {
-      const { cfg, target } = await resolveTarget(source, env)
+      const { cfg, adapter, target } = await resolveTarget(source, env)
       if (!sshKey) {
         throw new ShipkitError(EXIT.CONFIG, "no ssh key", "Set SHIPKIT_SSH_KEY or pass --ssh-key.")
       }
@@ -856,7 +881,11 @@ export class Shipkit {
         }
       })
 
-      r.set("schema", "untouched — migrations roll forward (docs/runbooks/restore.md)")
+      // Only where there is a schema. Telling the reader of a db=none rollback that nothing
+      // was done to a database it does not have is noise in the one report read under pressure.
+      if (cfg.db !== "none" && adapter.db) {
+        r.set("schema", "untouched — migrations roll forward (docs/runbooks/restore.md)")
+      }
       return serialize(r.success())
     } catch (err) {
       return serialize(r.failure(err))

@@ -29,6 +29,15 @@ export interface DeployPlan {
    * first deploy. Part of the token: provisioning production is a change, confirmed like one.
    */
   provision: string[]
+  /**
+   * Whether this project has a database at all — `db:` in shipkit.yaml, and an adapter that
+   * implements one.
+   *
+   * Part of the token: false is what makes `backup` and `migrate` skip, and a plan shown for a
+   * deploy that dumps production first does not authorise one that does not. With no
+   * migrations on either side nothing else in the plan would have changed to say so.
+   */
+  hasDb: boolean
   migrations: string[]
   sqlDigest: string
   sqlPreview: string
@@ -75,6 +84,9 @@ export function planToken(p: Omit<DeployPlan, "token">): string {
     imageTag: p.imageTag,
     currentImageTag: p.currentImageTag,
     provision: p.provision,
+    // Absent reads as "has one": a plan that does not say must not be the one that skips the
+    // backup, here or in renderPlan.
+    hasDb: p.hasDb !== false,
     migrations: p.migrations,
     sqlDigest: p.sqlDigest,
     allowLoss: p.allowLoss ?? [],
@@ -97,9 +109,17 @@ export function renderPlan(p: DeployPlan): string {
     `  target      ${p.env}  (${p.url})`,
     `  image       ${p.imageTag}${p.currentImageTag ? `  <-  currently ${p.currentImageTag}` : "  (first deploy to this server)"}${drift}`,
     ...(p.provision.length > 0 ? [`  server      ${p.provision.join("\n              ")}`] : []),
-    `  migrations  ${p.migrations.length > 0 ? p.migrations.join("\n              ") : "none"}`,
-    `  sql         ${p.sqlPreview}`,
-    `  backup      will run first; last verified ${p.lastVerifiedBackup ?? "never"}`,
+    // A project with no database has no migration list, no SQL and no backup to report, and
+    // three lines saying "none" read as a database that happens to be idle. It says instead
+    // which stages will not run — stated, not omitted (ADR 0004). Absent reads as "has one",
+    // so a plan that does not say still shows what it would do to a database.
+    ...(p.hasDb === false
+      ? [`  database    none  (backup and migrate are skipped)`]
+      : [
+          `  migrations  ${p.migrations.length > 0 ? p.migrations.join("\n              ") : "none"}`,
+          `  sql         ${p.sqlPreview}`,
+          `  backup      will run first; last verified ${p.lastVerifiedBackup ?? "never"}`,
+        ]),
     ...(p.stages ? [`  stages      ${p.stages.join(", ")} only`] : []),
     "",
     `  to execute: shipkit deploy --yes=${p.token}${p.stages ? ` --stage=${p.stages.join(",")}` : ""}`,

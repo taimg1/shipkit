@@ -51,18 +51,50 @@ function runLines(block: string[]): string[] {
   return out
 }
 
-// ADR 0001, as amended: the rule is per job now, and it is still "a checkout and one call".
-// Anything else in a `run:` is pipeline logic that moved into YAML, which is the leak this
-// whole layering exists to prevent.
-test("every job runs the wrapper and nothing else", () => {
+/**
+ * ADR 0001, as amended: the rule is per job now, and it is still "a checkout and one call".
+ * Anything else in a `run:` is pipeline logic that moved into YAML, which is the leak this
+ * whole layering exists to prevent.
+ *
+ * Three shapes of shell are allowed beside the wrapper, and none of them decides anything:
+ * writing `$NEEDS` to a file, writing the deploy key to a file, and handing the wrapper's own
+ * JSON to the GitHub API. The negative test below is the real guard — it is what would catch a
+ * `dagger call`, a `kamal deploy` or an `ssh` appearing here.
+ */
+const PLUMBING = [
+  /^set -euo pipefail$/,
+  /^printf '%s' "\$NEEDS" > /,
+  /^test -n "\$SHIPKIT_SSH_KEY" \|\| /,
+  /^install -m 600 \/dev\/null /,
+  /^printf '%s\\n' "\$SHIPKIT_SSH_KEY" > /,
+  /^id=\$\(gh api "repos\/\$GITHUB_REPOSITORY\/deployments" --input /,
+  /^gh api --silent "repos\/\$GITHUB_REPOSITORY\/deployments\/\$id\/statuses" --input /,
+]
+
+test("every job runs the wrapper, and what is not the wrapper is plumbing", () => {
   for (const file of WORKFLOWS) {
     for (const [name, block] of jobs(file)) {
       for (const line of runLines(block)) {
-        assert.match(
-          line,
-          /^(node "\$SHIPKIT" (ci --stage=|summary reports )|printf '%s' "\$NEEDS" > )/,
-          `${file}: job ${name} runs something that is not the wrapper: ${line}`,
+        const wrapper = /^node "\$SHIPKIT" (ci --stage=|summary reports |deploy --auto )/.test(line)
+        assert.ok(
+          wrapper || PLUMBING.some((shape) => shape.test(line)),
+          `${file}: job ${name} runs something that is neither the wrapper nor known plumbing: ${line}`,
         )
+      }
+    }
+  }
+})
+
+// The leak this whole layering exists to prevent, stated as the thing it would look like.
+// Every one of these is a decision about how the pipeline runs, and every one of them belongs
+// in the Dagger module — a client on Gitea or GitLab rewrites this file and keeps the pipeline.
+test("no job reaches past the wrapper into the pipeline or the server", () => {
+  for (const file of WORKFLOWS) {
+    for (const [name, block] of jobs(file)) {
+      for (const line of runLines(block)) {
+        for (const leak of [/\bdagger\b/, /\bkamal\b/, /\bdocker\b/, /\bssh\b/, /\bpsql\b/, /\bpg_dump\b/]) {
+          assert.ok(!leak.test(line), `${file}: job ${name} runs the pipeline itself: ${line}`)
+        }
       }
     }
   }
@@ -94,11 +126,12 @@ test("build and push are selected together, in one job", () => {
 })
 
 // A stage that failed is the one whose report the summary most needs; `if: always()` on the
-// upload is what puts it there.
-test("every stage job uploads its report even when the stage failed", () => {
+// upload is what puts it there. True of the deploy's report above all: it is what says whether
+// a rollback fired and where the pre-deploy dump is.
+test("every job that writes a report uploads it even when the job failed", () => {
   for (const file of WORKFLOWS) {
     for (const [name, block] of jobs(file)) {
-      if (!block.some((l) => l.includes("--stage="))) continue
+      if (!block.some((l) => l.includes("--report="))) continue
       const upload = block.findIndex((l) => l.includes("actions/upload-artifact@"))
       assert.ok(upload >= 0, `${file}: ${name} produces a report nothing collects`)
       assert.equal(block[upload + 1].trim(), "if: always()", `${file}: ${name}`)
@@ -110,12 +143,15 @@ test("every stage job uploads its report even when the stage failed", () => {
 
 // The summary is for the runs that went wrong. A `needs` that missed a job, or a missing
 // `if: always()`, would take it away from exactly those runs.
-test("the summary needs every other job and runs anyway", () => {
+test("the summary needs every check job and runs anyway", () => {
   for (const file of WORKFLOWS) {
     const all = jobs(file)
     const summary = all.get("summary")!
     const needs = /needs: \[(.+)\]/.exec(summary.join("\n"))![1].split(", ")
-    assert.deepEqual(needs.sort(), [...all.keys()].filter((n) => n !== "summary").sort(), file)
+    // Every job but the deploy, which renders its own summary from its own report in its own
+    // job: holding the CI summary behind a deploy would take it away from the reader who wants
+    // to know whether the commit was fit to release in the first place.
+    assert.deepEqual(needs.sort(), [...all.keys()].filter((n) => n !== "summary" && n !== "deploy").sort(), file)
     assert.ok(summary.some((l) => l.trim() === "if: always()"), file)
     assert.ok(summary.some((l) => l.includes("GITHUB_STEP_SUMMARY")), file)
     // Without the jobs' own results a job that failed before writing a report is invisible,
@@ -132,18 +168,107 @@ test("only the job that may publish is given a write token", () => {
       const text = block.join("\n")
       const publishes = text.includes("--stage=build,push")
       assert.equal(text.includes("packages: write"), publishes, `${file}: ${name}`)
-      assert.equal(text.includes("SHIPKIT_REGISTRY_TOKEN"), publishes, `${file}: ${name}`)
+      // The deploy pulls what that job published, so it carries the same variable with a
+      // read-only right. Nobody else has any business holding a registry credential.
+      const deploys = name === "deploy"
+      assert.equal(text.includes("SHIPKIT_REGISTRY_TOKEN"), publishes || deploys, `${file}: ${name}`)
+      assert.equal(text.includes("packages: read"), deploys, `${file}: ${name}`)
+      assert.equal(text.includes("deployments: write"), deploys, `${file}: ${name}`)
+      // An unused OIDC token that can assume a cloud role is a credential lying around.
+      assert.ok(!text.includes("id-token: write"), `${file}: ${name} asks for an OIDC token`)
     }
   }
 })
 
-// Automatic deploys are out of this wave. A workflow that still carried the job would deploy
-// on merge from a template nobody meant to hand out.
-test("the client templates deploy nothing", () => {
+/**
+ * The deploy job. Everything asserted here is a property that is silent when it is wrong: a
+ * deploy that runs on a pull request, two deploys migrating one database at once, a deploy
+ * cancelled halfway through a migration, or an SSH key handed to a job that has no use for it.
+ * None of them shows up as a red run; each of them shows up in production.
+ */
+test("the deploy job runs only on a push to the branch that publishes", () => {
   for (const file of WORKFLOWS) {
-    assert.ok(!jobs(file).has("deploy"), file)
-    assert.ok(!code(file).some((l) => l.includes("shipkit\" deploy") || l.includes("SHIPKIT_SSH_KEY")), file)
+    const deploy = jobs(file).get("deploy")!
+    const text = deploy.join("\n")
+    assert.match(text, /if: github\.event_name == 'push'/, file)
+    assert.match(text, /github\.ref_name == github\.event\.repository\.default_branch/, file)
+    // The image it releases must be the one this run published, from this commit.
+    assert.match(text, /needs: \[image\]/, file)
   }
+})
+
+test("one deploy at a time, and never a cancelled one", () => {
+  for (const file of WORKFLOWS) {
+    const text = jobs(file).get("deploy")!.join("\n")
+    assert.match(text, /concurrency:/, file)
+    assert.match(text, /group: shipkit-deploy-/, file)
+    // A deploy cancelled between `migrate` and `verify` leaves production on a schema nothing
+    // has verified. This line is the only thing preventing it.
+    assert.match(text, /cancel-in-progress: false/, file)
+  }
+})
+
+test("the deploy job is the only one that sees the deploy key", () => {
+  for (const file of WORKFLOWS) {
+    for (const [name, block] of jobs(file)) {
+      const uses = block.join("\n").includes("SHIPKIT_SSH_KEY")
+      assert.equal(uses, name === "deploy", `${file}: ${name}`)
+    }
+    const deploy = jobs(file).get("deploy")!.join("\n")
+    // An empty secret is a deploy that fails somewhere further in, against a server it never
+    // reached. It is refused here, by name.
+    assert.match(deploy, /test -n "\$SHIPKIT_SSH_KEY"/, file)
+    // Created empty with mode 600 and only then written: never world-readable, not for an instant.
+    assert.match(deploy, /install -m 600 \/dev\/null/, file)
+  }
+})
+
+// `--auto` is the only form that may run here: `--yes` would need a token nobody in a workflow
+// has read a plan for, and `--plan` deploys nothing. The report is what every step after it
+// reads, so it is not optional either.
+test("the deploy job calls --auto with a report", () => {
+  for (const file of WORKFLOWS) {
+    const deploy = jobs(file).get("deploy")!
+    const calls = runLines(deploy).filter((l) => l.includes('"$SHIPKIT" deploy'))
+    assert.equal(calls.length, 1, file)
+    assert.match(calls[0], /^node "\$SHIPKIT" deploy --auto --report=reports\/deploy\.json$/, file)
+    assert.ok(!calls[0].includes("--yes"), file)
+  }
+})
+
+// The plan and the command that executes it have to be somewhere a person looks, and that is
+// not the log of a job that failed twenty steps ago.
+test("the deploy job writes its summary and its deployment record even when it failed", () => {
+  for (const file of WORKFLOWS) {
+    const deploy = jobs(file).get("deploy")!
+    const text = deploy.join("\n")
+    assert.match(text, /node "\$SHIPKIT" summary reports --title Deploy >> "\$GITHUB_STEP_SUMMARY"/, file)
+    assert.match(text, /node "\$SHIPKIT" summary reports --deployment-status /, file)
+    // Both guarded the same way: run always, unless the kit itself was never fetched.
+    const always = deploy.filter((l) => l.trim() === "if: always() && env.SHIPKIT != ''")
+    assert.equal(always.length, 2, `${file}: the summary and the record must both run on a failed deploy`)
+  }
+})
+
+// The state must come from the report, not from the job. Using Actions' own `environment:` key
+// would create a second deployment whose status follows the job's outcome — which is exactly
+// the thing that must not decide it.
+test("the deployment status is posted from the wrapper's own mapping", () => {
+  for (const file of WORKFLOWS) {
+    const deploy = jobs(file).get("deploy")!
+    const text = deploy.join("\n")
+    assert.ok(!deploy.some((l) => /^ {4}environment:/.test(l)), `${file}: the job uses Actions' environment key`)
+    assert.match(text, /gh api "repos\/\$GITHUB_REPOSITORY\/deployments" --input/, file)
+    assert.match(text, /deployments\/\$id\/statuses" --input/, file)
+  }
+})
+
+// The variable exists for one stage of one kind of project. A `db: none` project has no schema,
+// so it has no connection string to hold, and a template that asks for one anyway teaches its
+// reader that the kit needs a secret it does not.
+test("only the database variant asks for a production connection string", () => {
+  assert.ok(code(WITH_DB).some((l) => l.includes("SHIPKIT_DATABASE_URL")), WITH_DB)
+  assert.ok(!code(NO_DB).some((l) => l.includes("SHIPKIT_DATABASE_URL")), NO_DB)
 })
 
 /**
@@ -187,8 +312,8 @@ test("the setup action fetches the kit by commit and checks what it installs", (
   assert.match(text, /sha256sum -c -/, "Dagger is installed without checking the archive")
   assert.match(text, /[0-9a-f]{64}/, "no pinned sha256 for the Dagger archive")
   assert.ok(!text.includes("install.sh"), "an installer is piped into a shell")
-  // Five jobs, one place. A job that installed its own Dagger could run the same commit on a
-  // different engine from the job beside it.
+  // Every job, one place. A job that installed its own Dagger could run the same commit on a
+  // different engine from the job beside it — including the job that deploys it.
   for (const file of WORKFLOWS) {
     const setupUses = code(file).filter((l) => l.trim() === "- uses: ./.github/actions/setup")
     assert.equal(setupUses.length, jobs(file).size, `${file}: a job does not use the setup action`)
@@ -198,16 +323,19 @@ test("the setup action fetches the kit by commit and checks what it installs", (
 
 /**
  * The two variants are one workflow. Keeping them in step by hand is exactly the drift ADR 0001
- * warns about, so the difference is stated here instead: the Migrations job, and its name in the
- * two `needs:` lists. Anything else diverging is a mistake in one of the two files.
+ * warns about, so the differences are stated here instead, and there are three: the Migrations
+ * job, its name in the two `needs:` lists, and the one environment variable that exists only
+ * because a project has a database. Anything else diverging is a mistake in one of the files.
  */
+const DB_ONLY = ["SHIPKIT_DATABASE_URL: ${{ secrets.SHIPKIT_DATABASE_URL }}"]
+
 test("the no-database variant is the workflow without the Migrations job", () => {
   const derived: string[] = []
   let skipping = false
   for (const line of code(WITH_DB)) {
     const header = /^ {2}([a-z][\w-]*):$/.exec(line)
     if (header) skipping = header[1] === "migrations"
-    if (skipping) continue
+    if (skipping || DB_ONLY.includes(line.trim())) continue
     derived.push(line.replace(/needs: \[(.+)\]/, (_, list: string) => `needs: [${list.split(", ").filter((n) => n !== "migrations").join(", ")}]`))
   }
   assert.deepEqual(code(NO_DB), derived)

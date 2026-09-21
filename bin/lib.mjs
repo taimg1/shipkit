@@ -70,7 +70,10 @@ export const COMMAND_OPTIONS = {
   rollback: { env: "value", "ssh-key": "value" },
   doctor: {},
   // Reads report files and prints markdown. It calls no module, so it takes no module options.
-  summary: { title: "value", jobs: "value" },
+  // --deployment-status writes the two GitHub API bodies for the deploy those reports describe
+  // into the directory it names; it is the same reading of the same files, rendered for a
+  // forge instead of for a person (bin/deployment.mjs).
+  summary: { title: "value", jobs: "value", "deployment-status": "value" },
 }
 
 function optionKind(name) {

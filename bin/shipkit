@@ -36,6 +36,7 @@ import {
   validateOptions,
 } from "./lib.mjs"
 import { parseJobResults, renderSummary } from "./summary.mjs"
+import { deploymentStatus } from "./deployment.mjs"
 
 const USAGE = `
 shipkit — CI/CD for turnkey client projects
@@ -55,6 +56,9 @@ shipkit — CI/CD for turnkey client projects
   shipkit doctor                     dagger? docker? shipkit.yaml? project?
   shipkit summary <dir>              one markdown table from the reports under <dir>
     [--jobs <file>]                  GitHub's toJSON(needs): a failed job fails the verdict
+    [--deployment-status <dir>]      instead: the GitHub deployment record for the deploy
+                                     those reports describe, written into <dir> as
+                                     deployment.json and status.json for \`gh api --input\`
 
 Options (an option a command does not take is an error, never ignored)
   --json            emit the raw report instead of a rendered table
@@ -345,6 +349,26 @@ async function main() {
   if (key === "summary") {
     const dir = opts._[1]
     if (!dir) fail(EXIT.CONFIG, "summary needs a directory of report files\n  shipkit summary ./reports")
+    // The same reports, rendered for a forge instead of for a person: two request bodies and
+    // one annotation, so the workflow's shell only has to post them. What the state is comes
+    // from the report and from nothing else (bin/deployment.mjs).
+    if (typeof opts["deployment-status"] === "string") {
+      const out = opts["deployment-status"]
+      const record = deploymentStatus(collectReports(dir), process.env)
+      try {
+        mkdirSync(out, { recursive: true })
+        writeFileSync(join(out, "deployment.json"), JSON.stringify(record.deployment, null, 2))
+        writeFileSync(join(out, "status.json"), JSON.stringify(record.status, null, 2))
+      } catch (err) {
+        // Nothing can be recorded, and the deploy has already happened either way. Say so
+        // loudly and let the step that cannot find the files fail: a silent miss here is a
+        // deployment nobody wrote down.
+        fail(EXIT.CONFIG, `could not write the deployment record to ${out}: ${err.message}`)
+      }
+      process.stdout.write(`${record.annotation}\n`)
+      process.exit(EXIT.OK)
+    }
+
     const title = typeof opts.title === "string" ? opts.title : "CI"
     // GitHub's `needs` results, so a job that failed without writing a report still fails the
     // verdict. Unreadable counts as failed: the summary must not say ok about what it cannot see.

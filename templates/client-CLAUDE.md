@@ -15,8 +15,13 @@ less; the reasoning lives in the shipkit repo's docs/adr/ and is read on demand.
   The token proves the plan was displayed; it does not prove anyone agreed to it.
 - **Never run `shipkit deploy --auto`.** It is the flag for an unattended pipeline: it deploys
   with no plan shown to anyone, for the case where there is nobody to show it to. In a
-  conversation there is — use `--plan`. The ci workflow does not deploy; a release is someone
-  reading a plan and passing its token.
+  conversation there is — use `--plan`. The `Deploy` job in `.github/workflows/ci.yml` is the
+  only thing that runs it, on a merge to the default branch.
+- A deploy job that ended red with **exit 4** stopped on purpose and changed nothing: the plan
+  needed a person. Do not re-run the job — it will stop in the same place for the same reason.
+  Read the plan in the job summary, show it, get a yes, then run `shipkit deploy --plan` from a
+  checkout of that commit and pass the token *that* prints. Never the token from the summary:
+  if production moved since, it no longer matches, and that is the confirmation working.
 - Tag images with the commit SHA. Never `latest`.
 
 ## Database

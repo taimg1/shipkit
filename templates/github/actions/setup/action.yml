@@ -2,8 +2,8 @@
 #
 # Copy to .github/actions/setup/action.yml in the client repository, beside the workflow that
 # uses it. The workflow runs one job per stage, so without this file the Dagger version, its
-# checksum and the way the kit is unpacked would be written out five times — and a version that
-# drifted in one of them would run the same commit on two different engines.
+# checksum and the way the kit is unpacked would be written out once per job — and a version
+# that drifted in one of them would run the same commit on two different engines.
 #
 # Setup only: nothing here decides what runs, what publishes, or whether a gate passed.
 name: shipkit setup

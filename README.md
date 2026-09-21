@@ -15,14 +15,23 @@ verify, roll back.
 Each job in the workflow YAML is a checkout and one call. Nothing else. That is what keeps
 the pipeline portable to Woodpecker, Gitea Actions or GitLab CI.
 
-One job per stage — Code analysis, Tests, Migrations, then Image, then a summary that renders
-every stage report into the run summary and is there precisely when a job failed. `build` and
-`push` share the built container in memory, so they are one job (ADR 0001, amendment).
+One job per stage — Code analysis, Tests, Migrations, then Image, then Deploy, plus a summary
+that renders every stage report into the run summary and is there precisely when a job failed.
+`build` and `push` share the built container in memory, so they are one job (ADR 0001,
+amendment).
 
 `templates/github/ci.yml` is what a client repository copies, together with
-`templates/github/actions/setup/action.yml`, which is how five jobs install one pinned Dagger
+`templates/github/actions/setup/action.yml`, which is how six jobs install one pinned Dagger
 and unpack one pinned kit. A project with no database copies `templates/github/ci-no-db.yml`
-instead: the same workflow without the Migrations job. Neither template deploys.
+instead: the same workflow without the Migrations job and without the production connection
+string.
+
+The `Deploy` job runs only on a push to the default branch, one at a time and never cancelled
+mid-migration, and it is the only job that sees the deploy key. It calls `shipkit deploy
+--auto` and records the result as a GitHub deployment whose state comes from the kit's report
+— not from whether the job reached its last step. Turning it on takes four things:
+"Before you turn the deploy job on" in `docs/runbooks/deploy.md`, and the fourth of them is
+running the first deploy by hand.
 
 ## Pipelines
 
@@ -32,9 +41,9 @@ instead: the same workflow without the Migrations job. Neither template deploys.
   then waits for confirmation.
 - `shipkit deploy --auto` self-approves only a plan with no destructive SQL, no declared data
   loss and nothing to provision; anything else stops with exit 4, having touched nothing, and
-  hands back the plan and the token that executes it. It is what an unattended deploy would run —
-  no client template wires one up yet, so a release is a person running `--plan` and then
-  `--yes=<token>`. `docs/runbooks/deploy.md`.
+  hands back the plan and the token that executes it. It is what the client templates' `Deploy`
+  job runs on a merge to the default branch. A stopped deploy is finished by a person:
+  `--plan`, read it, then `--yes=<token>`. `docs/runbooks/deploy.md`.
 
 ## Runbooks
 

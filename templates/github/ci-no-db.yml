@@ -11,8 +11,12 @@
 # project that keeps the job gets a green "skipped: db=none" box on every run — a run that looks
 # like it checked the migrations of a project that has none.
 #
-# Everything else about this workflow is ci.yml's, including why there is no deploy job and what
-# a client changes per stack. Read the header there.
+# The one further difference is in the deploy job: a project with no schema has no production
+# connection string, so `SHIPKIT_DATABASE_URL` is not set here at all. That line and the
+# Migrations job are the whole diff, and the line-by-line test named above knows about both.
+#
+# Everything else about this workflow is ci.yml's, including why the deploy job exists, why exit
+# 4 fails it, and what a client changes per stack. Read the header there.
 name: ci
 
 on:
@@ -103,9 +107,142 @@ jobs:
           path: reports/image.json
           if-no-files-found: warn
 
+  # A merge to the default branch deploys itself, when the plan is one the module may approve on
+  # its own: no destructive SQL, no declared data loss, nothing to provision, and the image for
+  # this commit published. `--auto` decides nothing — it only says that nobody is waiting at a
+  # terminal; core/auto-approve.ts in the module is what judges the plan.
+  #
+  # Anything else stops with exit 4: nothing on the server is touched, and this job goes red.
+  # That is deliberate, and it is the one decision in this file worth arguing about. Exit 4 is
+  # not a failure of the pipeline — the job summary says "stopped", not "failed", and the
+  # deployment below is recorded as `inactive`, never `success`. But GitHub Actions cannot give
+  # a job a neutral conclusion: the only way to get one is to publish a second check run beside
+  # this one, saying something different about the same work. A green box is worse — a merge
+  # that did not reach production must not look like one that did, and green is what people
+  # stop reading. So: red, with every surface saying what actually happened, and the plan plus
+  # the exact `shipkit deploy --yes=<token>` command in this job's summary.
+  deploy:
+    name: Deploy
+    # The Image job, which already needs the three checks. Not "ci passed somewhere": this
+    # commit's own image, from this run — anything else is a different commit as soon as two
+    # merges land close together.
+    needs: [image]
+    # Only a push, only to the branch that publishes. A tag never reaches here — `on:` filters
+    # it, and a tag's ref_name is not a branch name either — and a pull request never does.
+    if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    # One deploy at a time. Two merges landing a minute apart would otherwise migrate the same
+    # database from two runners at once; the module's server-side lock refuses the second, and
+    # this keeps it from ever being started. cancel-in-progress is false on purpose and must
+    # stay false: a deploy cancelled between `migrate` and `verify` leaves production on a
+    # schema nothing has verified, which is the one state this pipeline exists to avoid. The
+    # group is per repository and environment — add the service name if this repository ever
+    # deploys more than one.
+    concurrency:
+      group: shipkit-deploy-${{ github.repository }}-prod
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      # Reading the image ci published, not writing one. `packages: read` is enough for
+      # ghcr.io; another registry needs its own read-only credential in SHIPKIT_REGISTRY_TOKEN
+      # below, and then this line can go.
+      packages: read
+      # The deployment record the last step writes. It is the only right this job has that the
+      # others do not, and it grants nothing over the code.
+      deployments: write
+      # No `id-token: write`. Nothing here exchanges an OIDC token: the server is reached with
+      # the SSH key below and the registry with this job's GITHUB_TOKEN. Add it only if your
+      # registry or cloud is configured for OIDC, and add it only then — an unused token that
+      # can assume a cloud role is a credential lying around.
+    steps:
+      # Default depth: a deploy needs this commit's tree and its SHA, not its history. The
+      # migration diff base is the checks' business, and they have their own checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+
+      # The private half of the key whose public half is in the deploy user's authorized_keys
+      # on the server. A repository secret, never a file in the repository. The file is created
+      # empty with mode 600 and only then written, so the key never exists world-readable for
+      # even an instant; $RUNNER_TEMP is wiped with the runner.
+      - name: Write the deploy key
+        env:
+          SHIPKIT_SSH_KEY: ${{ secrets.SHIPKIT_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$SHIPKIT_SSH_KEY" || { echo "the repository secret SHIPKIT_SSH_KEY is empty: no key to reach the server with"; exit 2; }
+          install -m 600 /dev/null "$RUNNER_TEMP/deploy_key"
+          printf '%s\n' "$SHIPKIT_SSH_KEY" > "$RUNNER_TEMP/deploy_key"
+
+      - name: shipkit deploy --auto
+        env:
+          # The deploy key written above. The kit reads it engine-side as a Dagger secret; it is
+          # never an argument, so it cannot appear in a process listing or in the run log.
+          SHIPKIT_SSH_KEY: ${{ runner.temp }}/deploy_key
+          # Pulling the image onto the server. GITHUB_TOKEN covers ghcr.io for this
+          # repository's own packages (with `packages: read` above); for any other registry, or
+          # an image owned by another organisation, put a read-only token in a secret of your
+          # own and use it here instead.
+          SHIPKIT_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No SHIPKIT_DATABASE_URL here. `db: none` means the `migrate` stage is skipped
+          # outright, so there is no connection string to open and no secret to keep.
+          # Everything `.kamal/secrets` refers to. That file holds NAME=$NAME references, not
+          # values, and the kit resolves them here, where the environment is — a reference with
+          # nothing behind it stops the deploy before the server is touched (#19), naming every
+          # variable it could not resolve. So every name in your .kamal/secrets needs a line
+          # here. The two commented out below are only a shape — a site with no schema has
+          # whatever secrets it has; uncomment and rename them. The deploy does not start until
+          # every one of them resolves. KAMAL_REGISTRY_PASSWORD is not among them: the kit
+          # injects it from SHIPKIT_REGISTRY_TOKEN.
+          # SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          # UPSTREAM_API_TOKEN: ${{ secrets.UPSTREAM_API_TOKEN }}
+        # Exit 0 deployed and verified; exit 4 stopped and changed nothing; anything else is a
+        # gate, the configuration or the infrastructure. Everything but 0 fails this job.
+        run: node "$SHIPKIT" deploy --auto --report=reports/deploy.json
+
+      # The three steps below run even when the deploy failed or stopped — especially then. The
+      # report is what says which stage ran, where the pre-deploy dump is kept, which version is
+      # serving, whether a rollback fired, and, when it stopped, the plan and the token.
+      - name: Deploy summary
+        # Unless the kit itself was never fetched — there is nothing to render with, and the
+        # step that failed has already said why.
+        if: always() && env.SHIPKIT != ''
+        run: node "$SHIPKIT" summary reports --title Deploy >> "$GITHUB_STEP_SUMMARY"
+
+      # What went to production, recorded where GitHub shows it. The state comes from the report
+      # the deploy wrote and from nothing else: a deployment marked `success` while `verify`
+      # failed and the release was rolled back is worse than no record at all. The mapping is in
+      # the wrapper (bin/deployment.mjs, ADR 0009) and unit-tested there; these three lines only
+      # hand its two bodies to the API, and the module stays unaware that GitHub exists.
+      #
+      # This job deliberately does not use Actions' own `environment:` key: that creates a
+      # deployment whose status follows the job's outcome, which is exactly what must not decide
+      # it. A failure here fails the job even when the deploy succeeded — a deploy nobody wrote
+      # down is a gap in the record people consult during an incident, and it should be loud.
+      - name: Record the deployment
+        if: always() && env.SHIPKIT != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node "$SHIPKIT" summary reports --deployment-status "$RUNNER_TEMP/deployment"
+          id=$(gh api "repos/$GITHUB_REPOSITORY/deployments" --input "$RUNNER_TEMP/deployment/deployment.json" --jq .id)
+          gh api --silent "repos/$GITHUB_REPOSITORY/deployments/$id/statuses" --input "$RUNNER_TEMP/deployment/status.json"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: report-deploy
+          path: reports/deploy.json
+          if-no-files-found: warn
+
   summary:
     name: CI summary
     runs-on: ubuntu-latest
+    # The check jobs, not `deploy`. This summary is about whether the commit is fit to release,
+    # and it should be readable the moment those jobs are done rather than held behind a deploy
+    # that takes minutes. The deploy renders its own summary, in its own job, from its own
+    # report — and a deploy report merged into this table would be a second pipeline's stages
+    # in a table titled CI.
     needs: [analysis, tests, image]
     # The summary exists for the runs that failed. Skipping it when a job fails would remove it
     # from exactly the runs that need it.

@@ -10,6 +10,11 @@ import type { Config, Environment } from "./config.js"
  * value a missed quote lets through during `deploy --plan`. A name that is legal elsewhere
  * but not here is a smaller problem than a name that is a command.
  *
+ * This file answers one question — is the value safe in a command line — and not what it
+ * means. `stackVersion` is a target framework on one stack and a Node version on another;
+ * which of those it has to look like belongs to adapters/requirements.ts, and is checked
+ * there. Both run on every load.
+ *
  * Problems are returned, not thrown, so this file imports nothing and the tests can load it.
  */
 
@@ -40,8 +45,10 @@ const PG_NAME = /^[A-Za-z_][A-Za-z0-9_.-]{0,62}$/
 const HEALTH_PATH = /^\/[A-Za-z0-9._~%/-]*(?:\?[A-Za-z0-9._~%=&-]*)?$/
 /** URL characters, minus everything a shell treats as a quote, an expansion or an escape. */
 const URL_CHARS = /^https?:\/\/[A-Za-z0-9._~:/?#[\]@!&()*+,;=%-]+$/
-const VERSION = /^[0-9]+\.[0-9]+$/
+/** A runtime identifier, as .NET writes them and as core/platform.ts reads them. */
 const RID = /^[a-z0-9][a-z0-9.-]{0,63}$/
+/** A bare version token — `10.0`, `22`, `22.11.0` — and nothing a shell would act on. */
+const VERSION = /^[0-9][0-9.]{0,15}$/
 
 /** The first shell-bound field with an unacceptable value, or null when there is none. */
 export function configProblem(cfg: Config): ConfigProblem | null {
@@ -57,8 +64,8 @@ export function configProblem(cfg: Config): ConfigProblem | null {
 function checkConfig(cfg: Config): void {
   check("service", cfg.service, DOCKER_NAME, "letters, digits, . _ - (as in config/deploy.yml)", true)
   check("health", cfg.health, HEALTH_PATH, "an absolute path such as /health")
-  check("stackVersion", cfg.stackVersion, VERSION, "major.minor, such as 10.0")
-  check("targetArch", cfg.targetArch, RID, "a .NET runtime identifier, such as linux-x64")
+  check("stackVersion", cfg.stackVersion, VERSION, "a version, such as 10.0 for .NET or 22 for Node")
+  check("targetArch", cfg.targetArch, RID, "a runtime identifier, such as linux-x64")
   for (const [name, env] of Object.entries(cfg.environments)) checkEnvironment(name, env)
 }
 

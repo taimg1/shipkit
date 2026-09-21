@@ -1,0 +1,39 @@
+# The fixture's own configuration — the file a client Next.js repo would carry.
+#
+# Like fixtures/dotnet-api it has no `kit:` line: the fixture lives inside the kit and must
+# exercise the module it sits next to, not a released version of it.
+
+service: shipkit-fixture-next
+stack: next
+
+# Next.js is the stack that may have no database (docs/multi-stack-plan.md §6). The db,
+# backup and migrate stages are skipped, and the report says so rather than omitting them.
+# There is no Next DB adapter, so `db: postgres` here is refused at config rather than
+# skipping the migration gates for want of one.
+db: none
+
+delivery: kamal
+
+# Which linter `pre` runs. The adapter does not guess (§6) — a project linted by a tool it
+# does not use passes `pre` without being linted.
+lint: eslint
+
+# The Node version: the image everything is restored, linted, tested and built on.
+stackVersion: "22"
+
+# The architecture the image is built for. Unlike the .NET fixture there is no server behind
+# this one, so it is the architecture CI runs on — an image built under emulation for no
+# reason is minutes of every run.
+targetArch: linux-x64
+
+dockerfile: Dockerfile
+registry: ghcr.io/taimg1/shipkit-fixture-next
+
+# The fixture exercises the pipeline; it is not a product and must never put an image in
+# anyone's registry. Everything up to `push` still runs, so the stage is exercised as a
+# decision rather than skipped by accident.
+publish: false
+
+# Under /api so Next's middleware conventions leave it alone. It reports the commit the image
+# was built from — the whole point of gate 4 (docs/multi-stack-plan.md §5).
+health: /api/health

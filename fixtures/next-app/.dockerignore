@@ -1,0 +1,8 @@
+node_modules
+.next
+.git
+
+# Nothing that is not needed to build. `COPY . .` would otherwise carry it into the build
+# stage's cache and, for anything under public/, into the image.
+shipkit.yaml
+README.md

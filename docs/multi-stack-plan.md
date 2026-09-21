@@ -30,7 +30,7 @@ The pipeline shape is universal. The *content* of four stages is not.
 
 | Stage | Universal | Stack-specific |
 |---|---|---|
-| `pre` | "fail on formatting drift or analyzer errors" | `dotnet format --verify-no-changes` vs. `prettier --check` + `eslint` (or `biome ci`) |
+| `pre` | "fail on formatting drift, analyzer errors or type errors" | `dotnet format --verify-no-changes` + `dotnet build -warnaserror` vs. `eslint` (or `biome ci`) + `tsc --noEmit` |
 | `build` | "produce an image tagged with the commit SHA" | The `Dockerfile` — multi-stage, per stack |
 | `test` | "run tests against a real PostgreSQL via Testcontainers; any failure fails the build" | `dotnet test` vs. `vitest` / `jest`; `@testcontainers/postgresql` vs. `Testcontainers.PostgreSql` |
 | `db` | "produce a plain SQL diff of pending migrations → Squawk → apply to a schema copy" | How the diff is generated and how it is applied (see §4) |
@@ -96,14 +96,22 @@ interface DbAdapter {
 }
 ```
 
+This sketch is the design, written before any of it existed, and it is kept as the record of
+what was intended. The interface that runs is `.dagger/src/adapters/types.ts`, and it differs:
+the core builds the image and reads `health` from `shipkit.yaml`, so there is no `build()` and
+no `healthPath`; the core reads the history table over SSH, so `lastApplied` is core and the
+adapter only names the table; and a `StackRequirements` table (`adapters/requirements.ts`) says
+what each stack needs from `shipkit.yaml`. See "Where this stands" in §7.
+
 Configuration lives in the **client repo**, not the kit:
 
 ```yaml
 # shipkit.yaml
-stack: nest            # dotnet | nest | next | custom
-db: postgres           # postgres | none
+stack: next            # dotnet | next (nest and custom have no adapter yet)
+db: none               # postgres | none
 delivery: kamal        # kamal | static
-health: /health
+health: /api/health
+lint: eslint           # next: which linter `pre` runs
 ```
 
 ### The `custom` adapter — the escape hatch
@@ -192,10 +200,23 @@ Next.js is the odd one out: it may have no database, and it may not need a serve
 - **Pure static** (`output: 'export'`) → `delivery: static`. `ci` runs unchanged; `deploy`
   becomes "upload the export". Free tiers of static hosts frequently forbid commercial use
   (`ci-cd-plan.md` §11) — this is the one place where a paid tier is likely unavoidable.
-- `pre` for Next/Nest: `prettier --check` + `eslint --max-warnings 0`, or `biome ci` if the
-  project uses Biome. Pick one per project in `shipkit.yaml`; the adapter does not guess.
+- `pre` for Next/Nest: `eslint --max-warnings 0`, or `biome ci` if the project uses Biome.
+  Which one is `lint:` in `shipkit.yaml` — required for these stacks, and the adapter does not
+  guess. `tsc --noEmit` runs after it either way: a type error is a build failure, and without
+  it the first thing to notice is `next build` in the image stage, minutes later.
+  `prettier --check` is *not* run. A project that formats with Prettier configures its linter
+  to say so; adding a second tool the kit assumes is installed would fail every project that
+  does not have it.
 - `test`: `vitest` for unit; Playwright for e2e is **out of scope for `ci`** — it belongs in
   `verify` against the live URL if at all, otherwise it doubles CI time for every push.
+  Vitest is run with `--passWithNoTests`, which is not a relaxation: without it a run that
+  discovers nothing exits 1 with no counts, and the core can only report an exit code. With
+  it the run reports zero tests, and the core fails it as "no tests ran" — the same refusal
+  with the reason attached. It matters because `Tests  no tests` already exits 0 whenever a
+  test file contains no test.
+- Both the lint tool and the runner are commands the project owns, so they are run through
+  `npx --no-install`: plain `npx` downloads a tool the repository does not depend on, and a
+  gate that installs its own linter is not checking the project's.
 
 ---
 
@@ -218,6 +239,33 @@ stack is the test of the seam, not a feature**.
 
 Steps 1–2 are the original plan's steps 2–6 unchanged. Nothing in this document delays
 them; it only fixes what the .NET code is *not* allowed to assume.
+
+### Where this stands
+
+Steps 0, 1, 2 and **4** are built. Step 4 was taken before step 3, which §10 allowed for —
+the Next.js project that needed the kit existed and the NestJS one did not. So the seam was
+settled by `db: none` rather than by a second ORM: two adapters (`adapters/dotnet.ts`,
+`adapters/next.ts`), the .NET one unchanged in behaviour, and both fixtures run in the kit's
+own CI (`fixtures/dotnet-api`, `fixtures/next-app`).
+
+What the second implementation changed, which is what step 3 was for:
+
+1. **What a stack needs from `shipkit.yaml` is part of the seam.** `project` and
+   `migrationsProject` are `dotnet ef` arguments and were demanded of every project;
+   `stackVersion` had one meaning and one shape. That is now a table next to the adapters
+   (`adapters/requirements.ts`) that the core looks up — config is still validated in the
+   core, before an adapter exists (§8), but the rules are no longer .NET's by default.
+2. **An absent `DbAdapter` had to become a refusal.** The core skips the db stage when the
+   adapter has none, so `stack: next` with `db: postgres` would have skipped the migration
+   gates instead of running them. Config refuses it (ADR 0004: a gate that is not there is
+   worse than one that fails).
+3. **`parseTestSummary` had to distinguish "found nothing" from "could not read".** Zero
+   tests is a summary of zeros; unreadable output is `null`. Both fail closed, and only the
+   first can say why.
+
+The DB seam itself (§4) is therefore **still defined by one implementation**. Step 3 remains
+the test of it, and is the next thing to do before a full-stack Next or Nest project is
+taken on.
 
 ---
 
@@ -260,8 +308,10 @@ Stack-neutral versions of the current rules. The .NET-specific wording moves to 
 
 ## 10. Open questions added by this document
 
-- [ ] Which stack is actually first — .NET as planned, or whichever project is closest to
+- [x] Which stack is actually first — .NET as planned, or whichever project is closest to
       needing this? The order in §7 assumes .NET; steps 3 and 4 swap freely.
+      **Answered:** .NET first, then Next.js (step 4 before step 3), because the Next.js
+      project needing the kit exists and no NestJS one does. See §7, "Where this stands".
 - [ ] Prisma vs. Drizzle as the recommended ORM for new Nest projects. Both work; pick one to
       keep the template count down.
 - [ ] Whether `shipkit.yaml` also carries Kamal's `config/deploy.yml` values, or whether the

@@ -1,6 +1,6 @@
 # 0008 — Stack-specific logic lives behind one adapter interface; the core never branches on stack
 
-Status: proposed · 2026-09-11 · to be confirmed at step 3 of `docs/multi-stack-plan.md`
+Status: accepted · proposed 2026-09-11, confirmed 2026-09-21 by the second adapter
 
 ## Context
 
@@ -22,12 +22,29 @@ against.
 - A `custom` adapter delegating to Taskfile targets is the escape hatch for unknown stacks.
   It is written last.
 
-## Why "proposed" and not "accepted"
+## What confirmed it
 
-Because the interface in §3 is a guess made with one implementation. It becomes accepted
-when the NestJS adapter is written and the .NET adapter still passes — that is the moment
-two concrete implementations define the seam. If the interface has to change shape in a
-way §3 did not anticipate, this ADR is superseded, not edited.
+The interface in §3 was a guess made with one implementation. The condition for accepting it
+was a second adapter with the first still passing. That second adapter is **Next.js**, not
+NestJS — `docs/multi-stack-plan.md` §10 left steps 3 and 4 free to swap, and the Next.js
+project that needs the kit exists while a NestJS one does not.
+
+The seam held. What moved was smaller than a reshape, and is recorded in §7 of that document:
+
+- What a stack requires of `shipkit.yaml` turned out to be part of the seam, not part of the
+  core. `project` and `migrationsProject` are `dotnet ef` arguments that every project was
+  made to supply; `stackVersion` had a single meaning. They are now a per-stack table in
+  `adapters/requirements.ts`, which config looks up — config is still validated before an
+  adapter is chosen, so the table is data, not an adapter call.
+- An adapter without a `DbAdapter` had to become a refusal in config. The core skips the db
+  stage when there is none, so `stack: next` with `db: postgres` would have skipped the
+  migration gates rather than run them (ADR 0004).
+- `parseTestSummary` had to separate "the runner found no tests" from "the output could not
+  be read".
+
+One caveat, stated plainly: the **`DbAdapter` half of the seam is still defined by one
+implementation.** Next.js is `db: none`. Step 3 (NestJS + Prisma) remains the test of the
+database seam, and this ADR's confirmation does not extend to it.
 
 ## Consequences
 

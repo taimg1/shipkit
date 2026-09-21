@@ -1,5 +1,5 @@
 import { Container, Directory, File, Service } from "@dagger.io/dagger"
-import { Config } from "../config.js"
+import { Config, StackName } from "../config.js"
 
 /**
  * The seam between the universal core and one stack (ADR 0008).
@@ -7,8 +7,10 @@ import { Config } from "../config.js"
  * The core calls this interface and never branches on `name` after choosing an adapter.
  * Everything here varies by language or ORM; everything in core/ does not.
  *
- * NOTE: this interface is a guess made with one implementation. It becomes settled when a
- * second adapter exists and the first still passes — see docs/multi-stack-plan.md §7 step 3.
+ * Settled by a second implementation: adapters/next.ts, with the .NET one still passing
+ * (docs/multi-stack-plan.md §7, ADR 0008). What the second one changed is recorded there —
+ * in short, what a stack needs from shipkit.yaml is part of the seam too, and it lives in
+ * adapters/requirements.ts because the core validates config before choosing an adapter.
  */
 export interface TestSummary {
   passed: number
@@ -18,12 +20,17 @@ export interface TestSummary {
 }
 
 export interface StackAdapter {
-  readonly name: string
+  readonly name: StackName
 
   /** Dependencies restored with a cache mount; ready for lint and test. */
   restore(src: Directory, cfg: Config): Container
 
-  /** Must fail the container on formatting drift or analyzer errors. */
+  /**
+   * Must fail the container on formatting drift, analyzer errors or type errors.
+   *
+   * Which tool that is can be the project's choice rather than the stack's (`lint` in
+   * shipkit.yaml, docs/multi-stack-plan.md §6); the adapter reads it and never guesses.
+   */
   lint(c: Container, cfg: Config): Container
 
   /**
@@ -38,10 +45,20 @@ export interface StackAdapter {
    * The core needs the counts, not just the exit code: a run that discovers zero tests
    * exits 0 and would otherwise be reported as a pass. Parsing is stack-specific, so it
    * lives behind the seam; deciding that zero tests is a failure is the core's call.
+   *
+   * "The runner found no tests" is a summary of zeros, not null. Null is for output that
+   * carried no counts at all. Both fail closed, and the first one can say what happened —
+   * vitest exits 0 on a file that contains no test, so the distinction is not academic.
    */
   parseTestSummary(raw: string): TestSummary | null
 
-  /** Absent when `db: none`. */
+  /**
+   * Absent when the stack has no migrations to apply.
+   *
+   * The core skips the db stage when it is absent, so a stack without one may not be
+   * configured with a database at all — that refusal is in adapters/requirements.ts, because
+   * a skipped gate must not be how the kit answers "no adapter for this".
+   */
   db?: DbAdapter
 }
 

@@ -12,5 +12,5 @@ Never edit an accepted ADR to change its decision — write a new one that super
 | [0005](0005-migrations-never-at-startup.md) | Migrations are applied by the pipeline, never at app startup | accepted |
 | [0006](0006-bare-server-over-paas.md) | Bare server + Kamal, not PaaS | accepted |
 | [0007](0007-defer-infrastructure-as-code.md) | OpenTofu is deferred until hosting is chosen | deferred |
-| [0008](0008-stack-adapters.md) | Stack-specific logic behind one adapter interface; core never branches on stack | proposed |
+| [0008](0008-stack-adapters.md) | Stack-specific logic behind one adapter interface; core never branches on stack | accepted |
 | [0009](0009-shipkit-cli-wrapper.md) | A thin `shipkit` CLI wraps `dagger call`; raw Dagger stays reachable | accepted |

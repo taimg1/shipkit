@@ -1,0 +1,7 @@
+# Next's build output. Kept out of the repository and out of the pipeline's source directory:
+# it is the size of the dependency tree and it invalidates every cache it touches.
+.next/
+
+# Written by `next build` and by `tsc`, on every run, in whatever checkout ran them.
+next-env.d.ts
+tsconfig.tsbuildinfo

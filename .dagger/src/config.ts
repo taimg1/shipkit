@@ -3,6 +3,7 @@ import { parse } from "yaml"
 import { configError } from "./errors.js"
 import { hostKeyHint, parseKnownHosts } from "./core/known-hosts.js"
 import { configProblem } from "./config-validate.js"
+import { stackConfigProblem, stackRequirements, stackVersionText } from "./adapters/requirements.js"
 import { parseRetention } from "./core/backup-store.js"
 import { DEFAULT_MIGRATION_TIMEOUTS, MigrationTimeouts, pgDuration } from "./core/migrate-options.js"
 import { verifySettings } from "./core/health.js"
@@ -25,10 +26,22 @@ export interface Config {
   ready?: string
   /** Seconds `verify` keeps retrying before the release is declared failed. Default 60. */
   verifyTimeout: number
-  /** Path to the startup project — required by `dotnet ef`, never guessed. */
+  /**
+   * Path to the startup project — required by `dotnet ef`, never guessed.
+   *
+   * A .NET concept, so it is required only of the stacks that have one
+   * (adapters/requirements.ts). A Next.js project is built from the repository root and has
+   * nothing for this to point at; it defaults to "." there.
+   */
   project: string
   /** Path to the project holding the migrations. Differs from `project` in most solutions. */
   migrationsProject?: string
+  /**
+   * Which linter `pre` runs, for stacks where the project picks one — `eslint` or `biome`
+   * for Next (docs/multi-stack-plan.md §6). Empty for stacks that have exactly one, where
+   * naming it in shipkit.yaml would be configuration that does nothing.
+   */
+  lint: string
   dockerfile: string
   registry: string
   /**
@@ -48,19 +61,26 @@ export interface Config {
    */
   publish: boolean
   /**
-   * The language runtime version the project targets — `9.0`, `10.0`.
+   * The language runtime version the project targets. What that means, what shape it has and
+   * what it defaults to belong to the stack (adapters/requirements.ts): `10.0` is a .NET
+   * target framework, `22` is the Node version a Next project is built and run on.
    *
-   * Selects the SDK image, the image the migration bundle runs in, and the dotnet-ef major
-   * version. It was hardcoded to 10.0 until a real project turned out to be on 9.0, which is
-   * the kind of assumption a fixture written alongside the tool can never catch.
+   * For .NET it selects the SDK image, the image the migration bundle runs in, and the
+   * dotnet-ef major version. It was hardcoded to 10.0 until a real project turned out to be
+   * on 9.0, which is the kind of assumption a fixture written alongside the tool can never
+   * catch.
    *
    * `doctor` cross-checks it against the startup project's TargetFramework.
    */
   stackVersion: string
   /**
-   * Runtime identifier for the migration bundle. It MUST match the target server's
-   * architecture — a linux-x64 bundle simply will not execute on an arm64 host, and the
-   * failure happens on the server, mid-deploy, after the backup has already run.
+   * The architecture the image is built for, as a runtime identifier. Every stack has one:
+   * it selects the Docker platform (core/platform.ts), and for .NET the same value compiles
+   * the migration bundle.
+   *
+   * It MUST match the target server's architecture — an amd64 image does not execute on an
+   * arm64 host, and the failure happens on the server, mid-deploy, after the backup has
+   * already run.
    */
   targetArch: string
   /**
@@ -130,15 +150,21 @@ export async function loadConfig(source: Directory): Promise<Config> {
   if (!STACKS.includes(stack as StackName)) {
     throw configError(`unknown stack "${stack}"`, `Supported: ${STACKS.join(", ")}.`)
   }
-  if (stack !== "dotnet") {
-    throw configError(
-      `stack "${stack}" is not supported in v1`,
-      "v1 ships the dotnet adapter only. See docs/multi-stack-plan.md.",
-    )
-  }
 
   const db = (c.db as DbKind) ?? "postgres"
   if (db !== "postgres" && db !== "none") throw configError(`db must be "postgres" or "none"`)
+
+  // Everything that depends on WHICH stack it is: whether `project` is a thing this stack has,
+  // which linter the project picked, whether there is an adapter to migrate a database at all.
+  // The rules live next to the adapters (adapters/requirements.ts) — the core looks them up.
+  const stackProblem = stackConfigProblem(stack as StackName, {
+    project: c.project,
+    lint: c.lint,
+    db,
+    stackVersion: c.stackVersion,
+  })
+  if (stackProblem) throw configError(stackProblem.message, stackProblem.next)
+  const requirements = stackRequirements(stack)
 
   const delivery = (c.delivery as Delivery) ?? "kamal"
   if (delivery !== "kamal" && delivery !== "static") {
@@ -220,12 +246,16 @@ export async function loadConfig(source: Directory): Promise<Config> {
     health: (c.health as string) ?? "/health",
     ready: verifyCfg.ready,
     verifyTimeout: verifyCfg.verifyTimeout,
-    project: req(c, "project"),
+    // Checked above, per stack: required where the build needs it, the repository root where
+    // the whole repository is the project.
+    project: (c.project as string) ?? ".",
     migrationsProject: c.migrationsProject as string | undefined,
+    lint: (c.lint as string) ?? "",
     dockerfile: (c.dockerfile as string) ?? "Dockerfile",
     registry: (c.registry as string) ?? "",
     service,
-    stackVersion: (c.stackVersion as string) ?? "10.0",
+    stackVersion:
+      c.stackVersion === undefined ? requirements.version.fallback : stackVersionText(c.stackVersion),
     targetArch: (c.targetArch as string) ?? "linux-x64",
     defaultBranch: (c.defaultBranch as string) ?? "main",
     publish: c.publish === undefined ? true : c.publish === true,

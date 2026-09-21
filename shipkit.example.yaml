@@ -12,14 +12,36 @@ kit: github.com/taimg1/shipkit@REPLACE_WITH_40_CHAR_COMMIT
 # does not match, and it only labels images it built itself — so the kit labels ours.
 service: client-api
 
-stack: dotnet          # v1 supports dotnet only
-db: postgres           # postgres | none
+stack: dotnet          # dotnet | next  (nest and custom have no adapter yet)
+db: postgres           # postgres | none — "none" is required for a stack with no DB adapter
 delivery: kamal        # kamal | static
 
+# What a stack requires of this file is the stack's own business
+# (.dagger/src/adapters/requirements.ts), and what it does not require it refuses:
+#
+#   stack: dotnet   project (required), migrationsProject; stackVersion is a target framework
+#                   ("10.0", quoted); no `lint` — `dotnet format` is the only linter.
+#   stack: next     no project; stackVersion is the Node version ("22", quoted); db must be
+#                   "none"; `lint` names the linter (see below).
+#
 # Both projects are required by `dotnet ef` and are never guessed: in most solutions the
 # startup project and the migrations project are different.
 project: src/Api
 migrationsProject: src/Infrastructure
+
+# The runtime version, quoted — YAML reads 10.0 as the number 10. Left out it is the stack's
+# default (.NET 10.0, Node 22). `doctor` cross-checks the .NET one against the project file.
+stackVersion: "10.0"
+
+# The architecture the image is built for, and for .NET the one the migration bundle is
+# compiled for. It must match the SERVER: an amd64 image does not run on an arm64 host, and
+# the failure lands mid-deploy, after the backup.
+targetArch: linux-x64
+
+# Next only, and required there: which linter `pre` runs — eslint or biome. The adapter does
+# not guess (docs/multi-stack-plan.md §6); a project linted by a tool it does not use goes
+# green without being linted. `tsc --noEmit` runs either way.
+# lint: eslint
 
 dockerfile: Dockerfile
 # The repository only — the kit appends :sha-<commit>. Lowercase, even when the GitHub

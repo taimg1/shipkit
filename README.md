@@ -51,7 +51,7 @@ blocking anything.
 
 - `docs/ci-cd-plan.md` — *why*: the full plan, with the traps that motivated each decision.
 - `docs/v1-plan.md` — *now*: milestones M0–M7 for the stable .NET version, with a definition of done each.
-- `docs/multi-stack-plan.md` — *later*: what is core vs. per-stack (.NET / NestJS / Next.js) and the adapter seam.
+- `docs/multi-stack-plan.md` — *later*: what is core vs. per-stack (.NET / NestJS / Next.js) and the adapter seam. Two stacks are implemented: `dotnet` and `next`.
 - `docs/adr/` — one decision per file.
 - `docs/cli-design.md` — the CLI contract: commands, exit codes, report shape, plan token.
 - `docs/prototype-status.md` — what in the prototype is verified, and what is a guess.

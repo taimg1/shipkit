@@ -1,4 +1,4 @@
-# The kit's own CI: run the pipeline against the fixture on every push.
+# The kit's own CI: run the pipeline against every fixture on every push.
 #
 # ADR 0001 says this file is a checkout and one call. It is still true per job: every job below
 # is a checkout and one `shipkit ci --stage=...`. What changed is how many jobs there are.
@@ -9,8 +9,8 @@
 # read without opening anything.
 #
 # The cost is real and worth stating: each job is a fresh runner with a cold Dagger cache, so
-# the total machine time goes up. The three checks run in parallel, which buys most of the wall
-# clock back.
+# the total machine time goes up. The checks run in parallel — per stage, and per fixture since
+# the kit gained a second stack — which buys most of the wall clock back.
 #
 # `build` and `push` share the built container in memory, so they stay in one job. That is what
 # `--stage=build,push` exists for.
@@ -128,10 +128,66 @@ jobs:
           path: reports/image.json
           if-no-files-found: warn
 
+  # The same checks against the second stack. A kit with two adapters has two ways to break,
+  # and the Next one must be as hard to break unnoticed as the .NET one
+  # (docs/multi-stack-plan.md §7 step 4). The fixture is fixtures/next-app; its reports are
+  # collected separately so that one table never describes two projects.
+  #
+  # No `fetch-depth: 0` in these three: the full history is for resolving the migration diff
+  # base against main, and this fixture has no database and no migrations.
+  analysis-next:
+    name: Code analysis (next)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/setup
+      - working-directory: fixtures/next-app
+        run: node ../../bin/shipkit ci --stage=pre --report=../../reports/next-analysis.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: next-report-analysis
+          path: reports/next-analysis.json
+          if-no-files-found: warn
+
+  tests-next:
+    name: Tests (next)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/setup
+      - working-directory: fixtures/next-app
+        run: node ../../bin/shipkit ci --stage=test --report=../../reports/next-tests.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: next-report-tests
+          path: reports/next-tests.json
+          if-no-files-found: warn
+
+  # No `packages: write` and no registry token, unlike the .NET image job: this fixture is
+  # `publish: false` and there is nothing for it to push. The push stage still runs, and is
+  # still a decision it reports rather than a step that quietly did not happen.
+  image-next:
+    name: Image (next)
+    runs-on: ubuntu-latest
+    needs: [analysis-next, tests-next]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/setup
+      - working-directory: fixtures/next-app
+        run: node ../../bin/shipkit ci --stage=build,push --report=../../reports/next-image.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: next-report-image
+          path: reports/next-image.json
+          if-no-files-found: warn
+
   summary:
     name: CI summary
     runs-on: ubuntu-latest
-    needs: [unit, analysis, tests, migrations, image]
+    needs: [unit, analysis, tests, migrations, image, analysis-next, tests-next, image-next]
     # The summary exists for the runs that failed. Skipping it when a job fails would remove it
     # from exactly the runs that need it.
     if: always()
@@ -141,10 +197,19 @@ jobs:
         with:
           pattern: report-*
           path: reports
-      # The jobs' own results go in too. `unit` writes no report, and neither does a job that
-      # failed before the pipeline ran; from reports alone the summary said "ok" on a red run.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: next-report-*
+          path: reports-next
+      # One table per fixture. The summary merges the reports it is given by stage name, so a
+      # single directory would put two projects' `pre` in one row and describe neither.
+      #
+      # The jobs' own results go in too, to both tables: `unit` writes no report, and neither
+      # does a job that failed before the pipeline ran, and from reports alone the summary said
+      # "ok" on a red run. The verdict is the run's, so a red job marks both tables.
       - env:
           NEEDS: ${{ toJSON(needs) }}
         run: |
           printf '%s' "$NEEDS" > "$RUNNER_TEMP/needs.json"
-          node bin/shipkit summary reports --jobs "$RUNNER_TEMP/needs.json" >> "$GITHUB_STEP_SUMMARY"
+          node bin/shipkit summary reports --title "CI — dotnet fixture" --jobs "$RUNNER_TEMP/needs.json" >> "$GITHUB_STEP_SUMMARY"
+          node bin/shipkit summary reports-next --title "CI — next fixture" --jobs "$RUNNER_TEMP/needs.json" >> "$GITHUB_STEP_SUMMARY"

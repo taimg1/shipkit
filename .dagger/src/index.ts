@@ -576,19 +576,24 @@ export class Shipkit {
       if (only("migrate")) {
         if (cfg.db === "none" || !adapter.db) {
           r.skip("migrate", `db=${cfg.db}`)
-        } else if (!dbUrl) {
-          throw new ShipkitError(
-            EXIT.CONFIG,
-            "migrate needs the production connection string",
-            "Pass --db-url=env:SHIPKIT_DATABASE_URL.",
-          )
         } else {
           await r.stage("migrate", async () => {
             const from = await lastApplied(target, adapter.db!, sshKey)
             const pending = await adapter.db!.pendingList(source, cfg, from)
-            const result = await runMigrations(
-              source, cfg, target, adapter.db!, sshKey, dbUrl, pending, backupResult,
-            )
+            // Asked for here rather than before the stage: a code-only release applies nothing,
+            // and refusing it for a credential it will never use is a gate firing at the wrong
+            // deploy. Pending migrations and no connection string is still a refusal — and the
+            // count comes from the server, now, not from the plan.
+            if (!dbUrl && pending.length > 0) {
+              throw new ShipkitError(
+                EXIT.CONFIG,
+                `migrate needs the production connection string for ${pending.length} pending migration(s)`,
+                "Pass --db-url=env:SHIPKIT_DATABASE_URL.",
+              )
+            }
+            const result = dbUrl
+              ? await runMigrations(source, cfg, target, adapter.db!, sshKey, dbUrl, pending, backupResult)
+              : { applied: [], from }
             return withDetail(result, { from, applied: result.applied, timeouts: cfg.migrationTimeouts })
           })
         }

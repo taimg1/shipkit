@@ -2,6 +2,8 @@
 
 ```bash
 export SHIPKIT_SSH_KEY=path/to/deploy_key
+# Only when the deploy has migrations to apply; the plan says how many. A release with
+# nothing pending never opens that connection and does not ask for it.
 export SHIPKIT_DATABASE_URL="Host=...;Database=...;Username=...;Password=..."
 
 shipkit deploy --plan          # shows what would happen; changes nothing

@@ -41,3 +41,6 @@ dev-server/.ssh/
 # Kamal secrets are never committed. The fixture's is checked in deliberately: it holds
 # references to variables, not values, and is the example a client repo copies.
 !fixtures/dotnet-api/.kamal/secrets
+
+# Orca/Claude scratch worktrees, never repository content
+.claude/worktrees/

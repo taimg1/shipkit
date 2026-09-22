@@ -53,6 +53,27 @@ export interface StackAdapter {
   parseTestSummary(raw: string): TestSummary | null
 
   /**
+   * Prepares the browsers image named by `e2e.image` so the project's own e2e command can run
+   * in it. The core pulls that image, starts the built application and the declared services,
+   * and binds them; installing the project's dependencies inside it is the stack-specific part
+   * — `npm ci` for Node, something else for anything else — so it lives here.
+   *
+   * Absent when the stack has no e2e stage. The core then REFUSES a configured `e2e:` rather
+   * than skipping it: a block in shipkit.yaml that quietly does nothing is a gate the project
+   * believes it has (ADR 0004).
+   */
+  e2e?(browsers: Container, src: Directory, cfg: Config): Container
+
+  /**
+   * Reads the e2e runner's own counts, for the same reason as parseTestSummary: a suite that
+   * discovered nothing exits 0, and the core can only refuse that if the run reports counts.
+   *
+   * Separate from parseTestSummary because it is a different runner — vitest and Playwright
+   * do not print the same summary — and a stack may have one and not the other.
+   */
+  parseE2eSummary?(raw: string): TestSummary | null
+
+  /**
    * Absent when the stack has no migrations to apply.
    *
    * The core skips the db stage when it is absent, so a stack without one may not be

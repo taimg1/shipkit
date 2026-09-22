@@ -5,3 +5,8 @@
 # Written by `next build` and by `tsc`, on every run, in whatever checkout ran them.
 next-env.d.ts
 tsconfig.tsbuildinfo
+
+# Playwright's own output: traces, screenshots and the error context it writes per failed test.
+# Written by any local `npm run e2e`; inside the pipeline it lives and dies with the container.
+test-results/
+playwright-report/

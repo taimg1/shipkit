@@ -165,6 +165,25 @@ jobs:
           path: reports/next-tests.json
           if-no-files-found: warn
 
+  # `--stage=build,e2e` and not `--stage=e2e`: the stage serves the container `build` produced,
+  # in memory, so the two have to be in one job. That means this job builds the image a second
+  # time — the price of a browser suite that tests the artifact instead of the sources. A
+  # project with no `e2e:` block skips the stage and pays only the build.
+  e2e-next:
+    name: End-to-end (next)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/setup
+      - working-directory: fixtures/next-app
+        run: node ../../bin/shipkit ci --stage=build,e2e --report=../../reports/next-e2e.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: next-report-e2e
+          path: reports/next-e2e.json
+          if-no-files-found: warn
+
   # No `packages: write` and no registry token, unlike the .NET image job: this fixture is
   # `publish: false` and there is nothing for it to push. The push stage still runs, and is
   # still a decision it reports rather than a step that quietly did not happen.
@@ -187,7 +206,7 @@ jobs:
   summary:
     name: CI summary
     runs-on: ubuntu-latest
-    needs: [unit, analysis, tests, migrations, image, analysis-next, tests-next, image-next]
+    needs: [unit, analysis, tests, migrations, image, analysis-next, tests-next, e2e-next, image-next]
     # The summary exists for the runs that failed. Skipping it when a job fails would remove it
     # from exactly the runs that need it.
     if: always()

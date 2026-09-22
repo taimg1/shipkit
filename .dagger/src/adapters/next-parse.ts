@@ -62,3 +62,44 @@ export function parseVitestSummary(raw: string): TestSummary | null {
 }
 
 const empty = (): TestSummary => ({ passed: 0, failed: 0, skipped: 0, total: 0 })
+
+/**
+ * The counts Playwright prints at the end of a run, e.g.
+ *   1 failed
+ *   1 flaky
+ *   2 skipped
+ *   7 passed (12.4s)
+ *
+ * Unlike vitest there is no parenthesised total, so this one is a sum of the lines the runner
+ * printed — still the runner's own counts, never a re-derivation from the test list.
+ *
+ * `flaky` is a test that failed and then passed on a retry: the run exits 0, so it counts as
+ * passed. `interrupted` counts as failed and `did not run` as skipped, which is what they are.
+ *
+ * Returns zeros — not null — for `No tests found`, which is what Playwright says when its
+ * testDir or its filter matches nothing. Whether zero tests is a failure stays the core's
+ * call (core/e2e.ts, gates.ts): with `--pass-with-no-tests` that run exits 0, which is exactly
+ * the green-gate-that-checked-nothing this has to be able to report.
+ *
+ * Null means the output carried no counts at all — a run that died before reporting.
+ */
+export function parsePlaywrightSummary(raw: string): TestSummary | null {
+  const text = raw.replace(ANSI, "")
+
+  const summary: TestSummary = { passed: 0, failed: 0, skipped: 0, total: 0 }
+  let sawCounts = false
+  for (const l of text.split("\n")) {
+    // The whole line, so that a test name containing "2 passed" cannot be read as a count.
+    const m = /^(\d+)\s+(passed|failed|flaky|skipped|interrupted|did not run)(\s+\([^)]*\))?$/.exec(l.trim())
+    if (!m) continue
+    sawCounts = true
+    const n = Number(m[1])
+    if (m[2] === "passed" || m[2] === "flaky") summary.passed += n
+    else if (m[2] === "failed" || m[2] === "interrupted") summary.failed += n
+    else summary.skipped += n
+    summary.total += n
+  }
+
+  if (sawCounts) return summary
+  return /No tests found/.test(text) ? empty() : null
+}

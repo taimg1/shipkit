@@ -31,6 +31,12 @@ export interface StackRequirements {
    */
   lintTools: readonly string[]
   /**
+   * Whether the adapter can prepare a browser-test runner (`e2e` in adapters/types.ts).
+   * Without it an `e2e:` block in shipkit.yaml is refused rather than skipped — the project
+   * would otherwise believe it has a gate that never runs.
+   */
+  supportsE2e: boolean
+  /**
    * Whether the adapter has a DbAdapter. Without one the core skips the db stage
    * (`!adapter.db` in index.ts) — which for `db: postgres` would mean the migration gates
    * quietly not running. So the refusal belongs in config, not in the stage.
@@ -59,6 +65,7 @@ const DOTNET: StackRequirements = {
     fallback: "10.0",
   },
   lintTools: [],
+  supportsE2e: false,
   supportsDb: true,
 }
 
@@ -73,6 +80,7 @@ const NEXT: StackRequirements = {
     fallback: "22",
   },
   lintTools: ["eslint", "biome"],
+  supportsE2e: true,
   supportsDb: false,
 }
 
@@ -101,7 +109,7 @@ export function stackRequirements(stack: string): StackRequirements {
  */
 export function stackConfigProblem(
   stack: StackName,
-  raw: { project?: unknown; lint?: unknown; db?: unknown; stackVersion?: unknown },
+  raw: { project?: unknown; lint?: unknown; db?: unknown; stackVersion?: unknown; e2e?: unknown },
 ): ConfigProblem | null {
   if (!IMPLEMENTED_STACKS.includes(stack)) {
     return {
@@ -142,6 +150,16 @@ export function stackConfigProblem(
     return {
       message: `shipkit.yaml: "stackVersion" is not a version for stack "${stack}": ${JSON.stringify(raw.stackVersion)}`,
       next: `Expected ${req.version.expected}, quoted. Left out it is ${req.version.fallback}.`,
+    }
+  }
+
+  if (!req.supportsE2e && raw.e2e !== undefined && raw.e2e !== null) {
+    return {
+      message: `shipkit.yaml: stack "${stack}" has no e2e stage, so the e2e: block cannot be run`,
+      next:
+        "Remove it, or add `e2e` to that adapter (adapters/types.ts). Accepting it would mean " +
+        "the browser tests never run while shipkit.yaml says they do — a gate the project " +
+        "believes it has.",
     }
   }
 

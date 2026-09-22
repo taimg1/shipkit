@@ -95,3 +95,23 @@ test("every implemented stack has its own requirements", () => {
   assert.equal(stackRequirements("next").version.fallback, "22")
   assert.equal(stackRequirements("dotnet").version.fallback, "10.0")
 })
+
+// The same rule as supportsDb, for the same reason: the core would otherwise skip a stage the
+// project configured, and a skipped gate is how a gate stops being one (ADR 0004).
+test("a stack with no e2e adapter refuses the e2e block instead of ignoring it", () => {
+  const problem = stackConfigProblem("dotnet", dotnet({ e2e: { command: "x" } }))
+  assert.match(problem?.message ?? "", /has no e2e stage/)
+  assert.match(problem?.next ?? "", /adapters\/types\.ts/)
+
+  // Next has one, so the same block is accepted here and checked by e2e-config.ts instead.
+  assert.equal(stackConfigProblem("next", next({ e2e: { command: "x" } })), null)
+  // No block at all is never a problem for any stack.
+  assert.equal(stackConfigProblem("dotnet", dotnet()), null)
+})
+
+test("supportsE2e follows the adapters, not the stack's size", () => {
+  assert.equal(stackRequirements("next").supportsE2e, true)
+  assert.equal(stackRequirements("dotnet").supportsE2e, false)
+  // An unknown stack is treated as the strictest set, so it gets no e2e either.
+  assert.equal(stackRequirements("something-else").supportsE2e, false)
+})

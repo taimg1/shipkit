@@ -106,8 +106,10 @@ test("one job per stage, and the summary knows about all of them", () => {
       .map((l) => /--stage=(\S+)/.exec(l)?.[1])
       .filter((s): s is string => s !== undefined)
 
-  assert.deepEqual(stages(WITH_DB), ["pre", "test", "db", "build,push"])
-  assert.deepEqual(stages(NO_DB), ["pre", "test", "build,push"])
+  // `e2e` is selected with `build` because it serves the container that stage produced, in
+  // memory — the same reason `push` is (below).
+  assert.deepEqual(stages(WITH_DB), ["pre", "test", "build,e2e", "db", "build,push"])
+  assert.deepEqual(stages(NO_DB), ["pre", "test", "build,e2e", "build,push"])
 })
 
 // Split across runners, `push` finds no image in the engine's cache and skips itself: a green

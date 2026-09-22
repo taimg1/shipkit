@@ -42,3 +42,51 @@ health: /api/health
 # payload reports this one back, so a build that dropped it fails the test rather than the eye.
 buildArgs:
   NEXT_PUBLIC_FIXTURE_LABEL: shipkit-fixture
+
+# The browser tests, and what has to be running for them.
+#
+# `db: none` above is about migrations — this stack has no DB adapter, so the db, backup and
+# migrate gates do not apply. It says nothing about what the site talks to at run time, which
+# is what this block is for. A full-stack site with no ORM the kit knows is exactly this shape.
+e2e:
+  # The project's own runner, through `npx --no-install`: plain `npx` would download whatever
+  # the registry publishes under that name, and a gate that installs its own tool is not
+  # checking the project's.
+  command: npx --no-install playwright test
+
+  # Pinned by digest, like every image the kit runs (.dagger/src/core/images.ts). It is named
+  # here and not in the kit because it has to match the @playwright/test in package-lock.json:
+  # a browsers image the kit chose would run the suite on a different browser build than a
+  # developer's machine does.
+  image: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
+
+  # The port the built image listens on — the Dockerfile's PORT and EXPOSE — and the path it
+  # answers 2xx on once it is serving. The kit waits for that before the suite starts, so a
+  # site that never came up fails as that rather than as a page of assertion errors.
+  #
+  # The URL itself is the kit's to hand over: it serves the image it just built and puts the
+  # address in E2E_BASE_URL. playwright.config.ts reads that variable and has no fallback, so a
+  # run that was not given one fails instead of quietly testing localhost.
+  port: 3000
+  ready: /api/health
+  timeout: 300
+
+  # What the served image is given while the stage runs. In production Kamal supplies these.
+  # Public, test-only values: a secret does not go in shipkit.yaml (ADR 0006).
+  env:
+    DATABASE_URL: postgres://postgres:postgres@db:5432/app
+
+  services:
+    - name: db
+      # An explicit tag, never `latest`: a tag somebody else can move makes one commit mean
+      # two different runs.
+      image: postgres:17-alpine
+      port: 5432
+      env:
+        POSTGRES_USER: postgres
+        POSTGRES_PASSWORD: postgres
+        POSTGRES_DB: app
+      # The rows /orders is tested against. Without it the page renders an empty list and
+      # answers 200 — a green test of a broken page — so the data is the project's to state
+      # and the kit has no default for it.
+      initSql: ci/e2e-seed.sql

@@ -2,7 +2,7 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import { deploySelectionProblem, deployStageProblem, parseStages, selectedStages, stageRuns } from "../.dagger/src/core/stage-select.ts"
 
-const CI = ["pre", "build", "test", "db", "push"]
+const CI = ["pre", "build", "test", "e2e", "db", "push"]
 
 test("no --stage runs the whole pipeline", () => {
   const sel = parseStages(undefined, CI)

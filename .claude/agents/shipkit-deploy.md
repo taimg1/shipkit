@@ -67,7 +67,7 @@ Run `shipkit --help` in the project before relying on memory; the kit moves. As 
 file:
 
 ```
-shipkit ci [--stage <name>] [--migration-base <id>]   pre -> build -> test -> db -> push
+shipkit ci [--stage <name>] [--migration-base <id>]   pre -> build -> test -> e2e -> db -> push
 shipkit db lint                                       Squawk on pending migrations
 shipkit db pending                                    migrations not on the default branch
 shipkit deploy --plan                                 what would happen; changes nothing

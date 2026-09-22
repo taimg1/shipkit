@@ -148,10 +148,12 @@ jobs:
   # the exact `shipkit deploy --yes=<token>` command in this job's summary.
   deploy:
     name: Deploy
-    # The Image job, which already needs the three checks. Not "ci passed somewhere": this
-    # commit's own image, from this run — anything else is a different commit as soon as two
-    # merges land close together.
-    needs: [image]
+    # The Image job, which already needs the checks. Not "ci passed somewhere": this commit's
+    # own image, from this run — anything else is a different commit as soon as two merges land
+    # close together. `e2e` is named as well, although Image already waits for it: a deploy
+    # that stopped waiting for the browser suite because someone edited a different job's
+    # `needs:` is exactly the kind of quiet loss this file exists to prevent.
+    needs: [image, e2e]
     # Only a push, only to the branch that publishes. A tag never reaches here — `on:` filters
     # it, and a tag's ref_name is not a branch name either — and a pull request never does.
     if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch

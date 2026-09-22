@@ -33,6 +33,7 @@ The pipeline shape is universal. The *content* of four stages is not.
 | `pre` | "fail on formatting drift, analyzer errors or type errors" | `dotnet format --verify-no-changes` + `dotnet build -warnaserror` vs. `eslint` (or `biome ci`) + `tsc --noEmit` |
 | `build` | "produce an image tagged with the commit SHA" | The `Dockerfile` — multi-stage, per stack |
 | `test` | "run tests against a real PostgreSQL via Testcontainers; any failure fails the build" | `dotnet test` vs. `vitest` / `jest`; `@testcontainers/postgresql` vs. `Testcontainers.PostgreSql` |
+| `e2e` | "drive the image `build` just produced, with the services the project declares, through the suite the project owns; skip out loud when there is none" | the suite command and the browser image — Playwright for a site, whatever a project already owns elsewhere |
 | `db` | "produce a plain SQL diff of pending migrations → Squawk → apply to a schema copy" | How the diff is generated and how it is applied (see §4) |
 | `push` | GHCR, SHA tag, `main` only | — |
 | `backup` | `pg_dump`, verify non-empty and restorable | — |

@@ -15,16 +15,23 @@ verify, roll back.
 Each job in the workflow YAML is a checkout and one call. Nothing else. That is what keeps
 the pipeline portable to Woodpecker, Gitea Actions or GitLab CI.
 
-One job per stage — Code analysis, Tests, Migrations, then Image, then Deploy, plus a summary
-that renders every stage report into the run summary and is there precisely when a job failed.
-`build` and `push` share the built container in memory, so they are one job (ADR 0001,
+One job per stage — Code analysis, Tests, Migrations, then Image, then E2E, then Deploy, plus a
+summary that renders every stage report into the run summary and is there precisely when a job
+failed. `build` and `push` share the built container in memory, so they are one job (ADR 0001,
 amendment).
 
 `templates/github/ci.yml` is what a client repository copies, together with
-`templates/github/actions/setup/action.yml`, which is how six jobs install one pinned Dagger
+`templates/github/actions/setup/action.yml`, which is how seven jobs install one pinned Dagger
 and unpack one pinned kit. A project with no database copies `templates/github/ci-no-db.yml`
 instead: the same workflow without the Migrations job and without the production connection
 string.
+
+The `E2E` job drives the project's own browser suite against the image that was just built,
+with whatever services the `e2e:` block in shipkit.yaml declares started beside it. The `Deploy`
+job waits for it: a browser suite that reports after the release is a report, not a gate. A
+project with no `e2e:` block gets a stage that skips with "not configured" rather than a green
+row that suggests coverage it does not have — `docs/runbooks/e2e.md`, which also says which check
+to write first and why it is not this one.
 
 The `Deploy` job runs only on a push to the default branch, one at a time and never cancelled
 mid-migration, and it is the only job that sees the deploy key. It calls `shipkit deploy
@@ -35,7 +42,7 @@ running the first deploy by hand.
 
 ## Pipelines
 
-- `dagger call ci` — `pre` → `build` → `test` → `db` → `push`. Runs on every push and PR.
+- `dagger call ci` — `pre` → `build` → `test` → `e2e` → `db` → `push`. Runs on every push and PR.
 - `dagger call deploy` — `backup` → `migrate` → `release` → `verify` → `rollback` → `clean`.
   Without `--yes` it prints target, image version, pending migrations and the SQL diff,
   then waits for confirmation.
@@ -47,8 +54,8 @@ running the first deploy by hand.
 
 ## Runbooks
 
-`docs/runbooks/` — deploy, rollback, restore, adding a migration, rotating a secret,
-monitoring. Plus records of what the gates actually did when they were driven through their
+`docs/runbooks/` — deploy, rollback, restore, adding a migration, the browser suite, rotating a
+secret, monitoring. Plus records of what the gates actually did when they were driven through their
 failure cases.
 
 ## Status

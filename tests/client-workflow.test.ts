@@ -106,8 +106,40 @@ test("one job per stage, and the summary knows about all of them", () => {
       .map((l) => /--stage=(\S+)/.exec(l)?.[1])
       .filter((s): s is string => s !== undefined)
 
-  assert.deepEqual(stages(WITH_DB), ["pre", "test", "db", "build,push"])
-  assert.deepEqual(stages(NO_DB), ["pre", "test", "build,push"])
+  assert.deepEqual(stages(WITH_DB), ["pre", "test", "db", "build,push", "e2e"])
+  assert.deepEqual(stages(NO_DB), ["pre", "test", "build,push", "e2e"])
+})
+
+/**
+ * Where `e2e` sits in the graph, which is the whole of what this file decides about it.
+ *
+ * After the image, because the stage needs one and a browser run on a commit whose image does
+ * not build is minutes spent to learn what `build` says in seconds. Before the deploy, because a
+ * suite that reports after the release has already let the version it disagrees with serve —
+ * that is a report, not a gate (ADR 0004: a gate that does not stop anything is not a gate).
+ */
+test("e2e runs on the built image and the deploy waits for it", () => {
+  for (const file of WORKFLOWS) {
+    const all = jobs(file)
+    const e2e = all.get("e2e")!
+    assert.match(e2e.join("\n"), /needs: \[image\]/, file)
+    assert.deepEqual(runLines(e2e), ['node "$SHIPKIT" ci --stage=e2e --report=reports/e2e.json'], file)
+    const deploy = /needs: \[(.+)\]/.exec(all.get("deploy")!.join("\n"))![1].split(", ")
+    assert.deepEqual(deploy.sort(), ["e2e", "image"], `${file}: the deploy does not wait for e2e`)
+  }
+})
+
+// The suite pulls images; it pushes nothing and reaches no server. A credential here would be
+// one more job holding a token for no reason — the private-service case is commented out on the
+// job, permission and variable together, so uncommenting one without the other is not a thing
+// that can happen silently.
+test("the e2e job holds no credential and no extra permission", () => {
+  for (const file of WORKFLOWS) {
+    const text = jobs(file).get("e2e")!.join("\n")
+    for (const right of ["permissions:", "packages: read", "packages: write", "SHIPKIT_"]) {
+      assert.ok(!text.includes(right), `${file}: the e2e job asks for ${right}`)
+    }
+  }
 })
 
 // Split across runners, `push` finds no image in the engine's cache and skips itself: a green
@@ -192,8 +224,9 @@ test("the deploy job runs only on a push to the branch that publishes", () => {
     const text = deploy.join("\n")
     assert.match(text, /if: github\.event_name == 'push'/, file)
     assert.match(text, /github\.ref_name == github\.event\.repository\.default_branch/, file)
-    // The image it releases must be the one this run published, from this commit.
-    assert.match(text, /needs: \[image\]/, file)
+    // The image it releases must be the one this run published, from this commit, and the
+    // browser suite must have passed against it first.
+    assert.match(text, /needs: \[image, e2e\]/, file)
   }
 })
 

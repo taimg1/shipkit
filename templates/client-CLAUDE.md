@@ -42,6 +42,24 @@ less; the reasoning lives in the shipkit repo's docs/adr/ and is read on demand.
 - Database tests run against a real PostgreSQL via Testcontainers. Never mock the DbContext.
 - Keep `ci/seed.sql` covering every table. It is what proves a migration did not eat rows.
 
+## Browser tests
+
+- The `e2e` stage drives the image the pipeline just built, with the services `e2e:` in
+  shipkit.yaml declares. Never point it at production or at a preview URL, and never at
+  `next dev`: the artefact that ships is what has to be proven.
+- Run it with `shipkit ci --stage=e2e`. A red suite is not reopened by rerunning the job —
+  quarantine the one spec by name, with the reason and the date, in the same commit.
+- Every image in `e2e.services` carries an explicit tag, never `latest` or a branch name. One
+  commit must mean one run; a tag that moves overnight makes a red run unreadable.
+- A service that holds data gets `initSql:`. An empty database answers every query correctly
+  and returns nothing, so the page renders its empty state and the test goes green on a page
+  that is broken.
+- Assert a row, a measured value or visible text. `toBeVisible()` on a list passes on an empty
+  list and proves nothing.
+- Keep the crawler smoke in the unit tests: a handful of public routes, no cookies, a Googlebot
+  user agent, 200 and a non-empty `<title>`. It runs in `test` in seconds and catches what a
+  browser suite never will — every browser a person tests in already has cookies.
+
 ## The health contract
 
 - `/health` returns `{"status":"ok","version":"<commit sha>"}` and touches no dependency.

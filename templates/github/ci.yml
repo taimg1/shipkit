@@ -22,6 +22,13 @@
 # runners, `push` finds no image and skips itself — a green run that published nothing. That is
 # what `--stage=build,push` exists for.
 #
+# Then E2E: the built image started as a service with whatever `e2e:` in shipkit.yaml declares
+# beside it, and the project's own browser suite driven against it. It is the most expensive job
+# in the file and the only one the deploy waits for besides the image — a browser suite that
+# reports after the release is a report, not a gate. A project with no `e2e:` block gets a green
+# job whose report reads "skipped: not configured"; read the comment on the job before deciding
+# to keep it.
+#
 # The last job deploys. A push to the default branch releases its own image, unattended, when
 # the module may approve the plan itself; anything a person would want to look at stops with
 # exit 4 and hands the plan back. It is the only job that sees the deploy key, and the only one
@@ -34,7 +41,9 @@
 # the Dockerfile and the test runner; `db: none` means there is no Migrations job at all (use
 # ci-no-db.yml); `publish: false` means the Image job needs neither `packages: write` nor
 # SHIPKIT_REGISTRY_TOKEN, so delete both; `targetArch:` other than the runner's needs `qemu:`
-# on the setup step of the Image job. The commands themselves are never written here.
+# on the setup step of the Image job; no `e2e:` block means the E2E job skips itself out loud,
+# and whether to keep the job for the day the suite is written is the one judgement call here
+# (docs/runbooks/e2e.md). The commands themselves are never written here.
 #
 # Every action is pinned by commit SHA, with the version it was at in a comment: a tag can be
 # moved to other code by whoever controls the action's repository, and these steps run next to a
@@ -152,6 +161,59 @@ jobs:
           path: reports/image.json
           if-no-files-found: warn
 
+  # The image, driven by a browser. The app under test is the container `build` produces, started
+  # from the `e2e:` block in shipkit.yaml together with the services that block declares; the
+  # suite runs in a pinned browser image beside it. What it runs, against what, and how many
+  # tests it found are the module's and the report's — this job names a stage and collects a file.
+  #
+  # `--stage=e2e` alone, and the stage builds its own image engine-side. Actions cannot hand a
+  # container that lives in the engine's memory from one runner to the next — the same fact that
+  # keeps `build` and `push` in one job — so `needs: [image]` buys ordering, not an artifact: the
+  # build is a function of this tree, so the image this job exercises is the one that job built,
+  # and a commit whose image does not build fails there instead of halfway through a browser run.
+  #
+  # Why beside `image` and not inside it. `--stage=build,e2e,push` would keep an image no browser
+  # has seen out of the registry altogether; it would also cost the run graph a box, the summary a
+  # row, and the reader one red job covering three stages. The registry is addressed by the commit
+  # SHA and nothing releases what is in it but the job below, which needs this one — so an image
+  # the suite later rejects costs a tag nobody deploys, never a release.
+  #
+  # With no `e2e:` block in shipkit.yaml this job still costs a runner: it goes green in under a
+  # minute, the report says `e2e  skipped  not configured`, and the CI summary shows that row on
+  # every push. It is visible on purpose — a stage that skips silently is how a suite ends up
+  # switched off for a month without anyone noticing. A project that has no browser suite and is
+  # not about to write one deletes this job and its name from `needs:` on `deploy` and `summary`.
+  e2e:
+    name: E2E
+    runs-on: ubuntu-latest
+    needs: [image]
+    # No permissions block, so this job gets the workflow's `contents: read` and nothing else: it
+    # publishes nothing and reaches no server. One case widens it — a private image in
+    # `e2e.services`, which has to be pulled:
+    #
+    #   permissions:
+    #     contents: read
+    #     packages: read
+    #
+    # together with the variable on the step below. `packages: read` covers this repository's own
+    # packages on ghcr.io; an image owned by another organisation, or another registry, needs a
+    # read-only token of your own in place of GITHUB_TOKEN.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup
+      - run: node "$SHIPKIT" ci --stage=e2e --report=reports/e2e.json
+        # env:
+        #   # Only to pull a private service image, as above. Nothing in this job publishes.
+        #   SHIPKIT_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: report-e2e
+          path: reports/e2e.json
+          if-no-files-found: warn
+
   # A merge to the default branch deploys itself, when the plan is one the module may approve on
   # its own: no destructive SQL, no declared data loss, nothing to provision, and the image for
   # this commit published. `--auto` decides nothing — it only says that nobody is waiting at a
@@ -168,10 +230,12 @@ jobs:
   # the exact `shipkit deploy --yes=<token>` command in this job's summary.
   deploy:
     name: Deploy
-    # The Image job, which already needs the three checks. Not "ci passed somewhere": this
-    # commit's own image, from this run — anything else is a different commit as soon as two
-    # merges land close together.
-    needs: [image]
+    # The Image job and the E2E job, which between them already need every check. Not "ci passed
+    # somewhere": this commit's own image, from this run — anything else is a different commit as
+    # soon as two merges land close together. E2E is here rather than left to run alongside the
+    # release because a browser suite that reports after the deploy is a report, not a gate: by
+    # the time it goes red the version it disagrees with is the one serving.
+    needs: [image, e2e]
     # Only a push, only to the branch that publishes. A tag never reaches here — `on:` filters
     # it, and a tag's ref_name is not a branch name either — and a pull request never does.
     if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
@@ -293,7 +357,7 @@ jobs:
     # that takes minutes. The deploy renders its own summary, in its own job, from its own
     # report — and a deploy report merged into this table would be a second pipeline's stages
     # in a table titled CI.
-    needs: [analysis, tests, migrations, image]
+    needs: [analysis, tests, migrations, image, e2e]
     # The summary exists for the runs that failed. Skipping it when a job fails would remove it
     # from exactly the runs that need it.
     if: always()

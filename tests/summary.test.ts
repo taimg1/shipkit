@@ -48,6 +48,32 @@ test("stages are listed in pipeline order, not in the order the jobs finished", 
   assert.deepEqual(merged.map((s: { name: string }) => s.name), CI_STAGE_ORDER)
 })
 
+// A stage this table does not know about is appended after the last one it does, so an `e2e`
+// missing from the order would be rendered below `push` — reading as if the browser suite ran
+// after the image was published, which is the one thing about its position that matters.
+test("e2e is rendered where it runs: after test, before db and push", () => {
+  assert.deepEqual(CI_STAGE_ORDER, ["pre", "build", "test", "e2e", "db", "push"])
+  const merged = mergeStages([jobReport("push", {}), jobReport("e2e", {})])
+  assert.deepEqual(merged.map((s: { name: string }) => s.name), CI_STAGE_ORDER)
+})
+
+// The suite's count reaches the table through the same `tests` field the test stage uses, so a
+// suite that quietly stopped discovering specs is a 0 in the summary rather than a green row.
+test("the e2e row carries the count the stage reported", () => {
+  const out = renderSummary([jobReport("e2e", { tests: { total: 64, passed: 64, failed: 0 } })])
+  assert.match(out, /\| `e2e` \|.*64\/64 passed/)
+})
+
+// Not configured is not ok. The reason is what a reader needs: the project has no browser
+// coverage, and that is a choice somebody made, not a stage that had nothing to do.
+test("an e2e stage with no configuration renders its reason", () => {
+  const skipped = jobReport("pre", {})
+  skipped.stages = skipped.stages.map((s) =>
+    s.name === "e2e" ? { name: "e2e", status: "skipped", reason: "not configured" } : s,
+  )
+  assert.match(renderSummary([skipped]), /\| `e2e` \|.*not configured/)
+})
+
 test("the verdict is failed when any job failed", () => {
   const bad = { ...jobReport("test", {}), ok: false, error: "tests failed" }
   assert.match(renderSummary([bad]), /^## CI — failed/)

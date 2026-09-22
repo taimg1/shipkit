@@ -33,6 +33,7 @@ The pipeline shape is universal. The *content* of four stages is not.
 | `pre` | "fail on formatting drift, analyzer errors or type errors" | `dotnet format --verify-no-changes` + `dotnet build -warnaserror` vs. `eslint` (or `biome ci`) + `tsc --noEmit` |
 | `build` | "produce an image tagged with the commit SHA" | The `Dockerfile` — multi-stage, per stack |
 | `test` | "run tests against a real PostgreSQL via Testcontainers; any failure fails the build" | `dotnet test` vs. `vitest` / `jest`; `@testcontainers/postgresql` vs. `Testcontainers.PostgreSql` |
+| `e2e` | "drive the image `build` just produced, with the services the project declares, through the suite the project owns; skip out loud when there is none" | the suite command and the browser image — Playwright for a site, whatever a project already owns elsewhere |
 | `db` | "produce a plain SQL diff of pending migrations → Squawk → apply to a schema copy" | How the diff is generated and how it is applied (see §4) |
 | `push` | GHCR, SHA tag, `main` only | — |
 | `backup` | `pg_dump`, verify non-empty and restorable | — |
@@ -217,13 +218,40 @@ Next.js is the odd one out: it may have no database, and it may not need a serve
   `prettier --check` is *not* run. A project that formats with Prettier configures its linter
   to say so; adding a second tool the kit assumes is installed would fail every project that
   does not have it.
-- `test`: `vitest` for unit; Playwright for e2e is **out of scope for `ci`** — it belongs in
-  `verify` against the live URL if at all, otherwise it doubles CI time for every push.
-  Vitest is run with `--passWithNoTests`, which is not a relaxation: without it a run that
-  discovers nothing exits 1 with no counts, and the core can only report an exit code. With
-  it the run reports zero tests, and the core fails it as "no tests ran" — the same refusal
-  with the reason attached. It matters because `Tests  no tests` already exits 0 whenever a
-  test file contains no test.
+- `test`: `vitest` for unit. It is run with `--passWithNoTests`, which is not a relaxation:
+  without it a run that discovers nothing exits 1 with no counts, and the core can only report
+  an exit code. With it the run reports zero tests, and the core fails it as "no tests ran" —
+  the same refusal with the reason attached. It matters because `Tests  no tests` already exits
+  0 whenever a test file contains no test.
+- `e2e`: Playwright, in a stage of its own, against the image `build` just produced.
+
+  **This reverses what this section used to say**, which was that Playwright was *out of scope
+  for `ci`* — that it belonged in `verify` against the live URL if anywhere, and otherwise
+  doubled CI time for every push. The sentence is rewritten rather than deleted because both
+  halves of it were wrong in a way worth keeping on the record.
+
+  The first half mistook what `verify` is. `verify` is the health gate of a deploy: it asks
+  whether the version now serving answers and reports the SHA it was supposed to, and it rolls
+  the release back when it does not. A browser suite there runs *after* the release, against
+  production, and a check that reports after the thing it checks has shipped is a report, not a
+  gate (ADR 0004). It would also make every red suite an incident.
+
+  The second half mistook the arithmetic. The cost is not "every push doubles": it is one job,
+  opt-in per project through the `e2e:` block in shipkit.yaml, skipped with a visible
+  "not configured" where there is no suite — and it runs in parallel with nothing else, after
+  `build`, so what it adds to the wall clock is its own minutes and not the pipeline's.
+
+  What settled it was the first real consumer. Its regressions were the kind no unit test
+  states — a line box collapsing so descenders fell into the row below, an element that
+  silently became a scroll container, a route that answers a visitor with no cookies
+  differently from one with them. Three pages left the search index before anyone noticed. The
+  cheapest slice of that class needs no browser at all and belongs in `test` as a crawler smoke
+  (`docs/runbooks/e2e.md`); the rest needs a real browser, and a real browser needs a stage.
+
+  Where it sits: after `build`, because it needs the image; before `push` and before the deploy,
+  because a gate that lets the artefact out first is not gating it. `CI_STAGES` is therefore
+  `pre, build, test, e2e, db, push`, and the client workflow's `Deploy` job needs the `E2E` job
+  as well as the `Image` one.
 - Both the lint tool and the runner are commands the project owns, so they are run through
   `npx --no-install`: plain `npx` downloads a tool the repository does not depend on, and a
   gate that installs its own linter is not checking the project's.

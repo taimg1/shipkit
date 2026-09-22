@@ -63,8 +63,9 @@ From the ADRs and runbooks, and just as binding:
 
 ## What the CLI actually offers
 
-Run `shipkit --help` in the project before relying on memory; the kit moves. As of this
-file:
+Run `shipkit --help` in the project before relying on memory: it runs the wrapper from the
+commit that project pins, which is the only authority on what exists there. The shape, for
+orientation:
 
 ```
 shipkit ci [--stage <name>] [--migration-base <id>]   pre -> build -> test -> e2e -> db -> push
@@ -76,7 +77,7 @@ shipkit deploy --auto                                 the pipeline's own path (s
 shipkit backup [--out <path>]                         a dump proven restorable
 shipkit rollback sha-<commit>
 shipkit doctor
-shipkit summary <dir> [--jobs <file>]
+shipkit summary <dir> [--jobs <file>] [--deployment-status <out>]
 ```
 
 Global: `--json`, `--report <path>`, `--sha`, `--branch`, `--env`, `--explain`, `--module`,
@@ -198,15 +199,35 @@ Two things about these documents, because they will cost you otherwise. They con
 other in places — where a runbook and an older plan disagree, the runbook is the one written
 against a run that happened. And several of them describe intent rather than shipped code:
 off-site backups are stated as a rule and are not implemented, `shipkit init` and
-`shipkit status` do not exist, and the Nest and Next adapters are planned, not built. When a
-document promises a command, check `shipkit --help` before quoting it.
+`shipkit status` do not exist, `delivery: static` is refused rather than built, and the Nest
+adapter is planned. Which of these is still true depends on the commit a project pins — see
+the section below. When a document promises a command, check `shipkit --help` in that project
+before quoting it: it runs the wrapper from the pinned commit.
 
-## State of the kit
+## Which kit you are actually operating
 
-Written 2026-09-21, against the `fix/security-hardening` branch, which is not merged into
-`main` yet. Everything in it that a deploy depends on — a pinned `hostKey` per environment,
-a required readiness path (`ready:`), pre-deploy dumps stored on the server under
-`/var/backups/shipkit/<service>/`, full 40-character SHA tags, `deploy --auto` and the
-self-approval policy, the deploy lock — lands with that merge. Against `main` as it stands,
-`--auto`, `hostKey`, `ready:` and `docs/runbooks/registry.md` do not exist. Check which
-commit a client repo pins in `kit:` before assuming which of the two you are operating.
+The kit moves, and a client repository runs the commit it pins, not the working copy on this
+machine. So the state of the kit is something to find out, never something to remember.
+
+Before you rely on a feature — `--auto`, `e2e:`, `buildArgs:`, a `hostKey` requirement, a
+runbook you want to quote — establish which commit is in play:
+
+```bash
+sed -n 's/^kit: github.com\/[^@]*@//p' shipkit.yaml     # in the client repo
+git -C ~/dev/shipkit log --oneline -1 <that commit>     # what it is
+git -C ~/dev/shipkit show <that commit>:bin/shipkit | head -40   # the commands it really has
+```
+
+`shipkit --help` in the client repo is the other half of the same answer: it runs the wrapper
+from the pinned commit, so what it prints is what exists for that project.
+
+Two consequences worth stating, because both have already cost a round trip here:
+
+- A feature that exists in `~/dev/shipkit` on `main` does not exist for a project pinned to an
+  older commit. Read the pin, not the repository you happen to be standing in.
+- Documentation under `~/dev/shipkit/docs/` describes `main`. When the pin is older, the
+  runbook can promise a flag the project's kit does not have. `git show <pin>:docs/...` is how
+  you read the documentation that belongs to that project.
+
+Anything a client repository pins is also a commit you can read in full. Prefer reading it over
+asking whether something landed.

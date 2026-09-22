@@ -229,7 +229,11 @@ test("the deploy job runs only on a push to the branch that publishes", () => {
     const deploy = jobs(file).get("deploy")!
     const text = deploy.join("\n")
     assert.match(text, /if: github\.event_name == 'push'/, file)
-    assert.match(text, /github\.ref_name == github\.event\.repository\.default_branch/, file)
+    // Named, not read from GitHub's default branch: those are different things, and the first
+    // project to use this released from `main` while its GitHub default was `dev` — the deploy
+    // skipped on the merge it exists for. The comment beside it says to keep the two in step.
+    assert.match(text, /github\.ref_name == '[^']+'/, file)
+    assert.doesNotMatch(text, /ref_name == github\.event\.repository\.default_branch/, file)
     // The image it releases must be the one this run published, from this commit, and the
     // browser suite must have passed against it first.
     assert.match(text, /needs: \[image, e2e\]/, file)

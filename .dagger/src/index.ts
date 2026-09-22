@@ -138,6 +138,30 @@ async function refuseEmptySecrets(source: Directory, kamalSecrets?: Secret): Pro
     return
   }
   const declared = declaredSecrets(deployYml)
+  if (declared.length === 0) return
+
+  // Before blaming the values: is the file that names them even here? `.kamal/secrets` holds
+  // references and no values, and a repository that gitignores it deploys fine from a
+  // workstation — where the wrapper reads the untracked copy — and then fails on a runner,
+  // which checks out a repository that does not contain it. The old message said "no value"
+  // and advised exporting variables, which is true of a file nobody could read and sends the
+  // reader to look in the wrong place. Seen on the first unattended deploy of a real project.
+  let secretsFile = true
+  try {
+    await source.file(".kamal/secrets").contents()
+  } catch {
+    secretsFile = false
+  }
+  if (!secretsFile) {
+    throw new ShipkitError(
+      EXIT.CONFIG,
+      `config/deploy.yml declares secrets (${declared.join(", ")}) but .kamal/secrets is not in the repository`,
+      "It is probably gitignored. It holds references — NAME=$NAME — and never values, so it " +
+        "belongs in the repository: the deploy runs on a checkout, and a file that is not " +
+        "committed is not there. The values stay in the CI secret store.",
+    )
+  }
+
   const provided = kamalSecrets ? await kamalSecrets.plaintext() : ""
   const absent = missingSecrets(declared, provided)
   if (absent.length > 0) {
@@ -436,6 +460,11 @@ export class Shipkit {
     /** The username sent with the token, as `ci` takes it: the plan asks the registry too. */
     registryUser?: string,
     /**
+     * The branch this deploy is running from, as `ci` reads it. Only `--auto-approve` uses it:
+     * a run nobody is watching may not release a branch nobody released.
+     */
+    branch?: string,
+    /**
      * The project's .kamal/secrets with its references resolved by the wrapper. Without it the
      * container running Kamal has no values for anything the project declares as a secret, and
      * Kamal deploys an empty string in their place (#19).
@@ -530,7 +559,7 @@ export class Shipkit {
           // deploy then executes exactly it. Nothing is re-planned afterwards, so there is no
           // window between what the policy looked at and what runs.
           await r.stage("approve", async () => {
-            const refusal = autoApproveRefusal(plan)
+            const refusal = autoApproveRefusal(plan, { branch, defaultBranch: cfg.defaultBranch })
             if (refusal) {
               // The same thing `deploy --plan` prints, so the person this hands over to does
               // not have to go and ask production the same questions again.

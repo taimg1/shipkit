@@ -117,3 +117,35 @@ test("the report records the facts the decision was made on", () => {
 test("the recorded facts name the stages when only some were selected", () => {
   assert.deepEqual(approvalFacts(plan({ stages: ["backup", "migrate"] })).stages, ["backup", "migrate"])
 })
+
+// The branch, which the first unattended deploy of a real project got wrong: the workflow
+// condition compared the ref against GitHub's default branch (`dev` there) while releases came
+// from `main`, so the deploy skipped on the merge it existed for. A condition naming the wrong
+// branch is one line; this makes that line unable to release anything on its own.
+test("only the release branch deploys unattended", () => {
+  const p = safe
+  assert.equal(autoApproveRefusal(p, { branch: "main", defaultBranch: "main" }), null)
+  assert.match(
+    autoApproveRefusal(p, { branch: "hotfix/x", defaultBranch: "main" }) ?? "",
+    /this is hotfix\/x, and only main deploys unattended/,
+  )
+  assert.match(
+    autoApproveRefusal(p, { branch: "pull_request:refs/pull/7/merge", defaultBranch: "main" }) ?? "",
+    /only main deploys unattended/,
+  )
+})
+
+test("a branch nobody reported stops an unattended deploy too", () => {
+  // Absence is not permission: outside Actions the wrapper may have no branch to send, and a
+  // run that cannot say where it is cannot be the run that releases production.
+  assert.match(
+    autoApproveRefusal(safe, { defaultBranch: "main" }) ?? "",
+    /branch is unknown/,
+  )
+})
+
+test("a plan token still deploys any branch: the policy is about nobody watching", () => {
+  // Nothing here refuses the token path — this function is not called for it. The assertion is
+  // on the default: with no release branch named, the branch rule says nothing at all.
+  assert.equal(autoApproveRefusal(safe), null)
+})

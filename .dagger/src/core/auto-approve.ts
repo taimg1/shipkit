@@ -27,8 +27,24 @@ import type { DeployPlan } from "./plan-token.js"
  * about to cost a round trip anyway, and "it is also a first deploy" is exactly the kind of
  * thing that is discovered one refusal at a time otherwise.
  */
-export function autoApproveRefusal(plan: DeployPlan): string | null {
+export function autoApproveRefusal(
+  plan: DeployPlan,
+  where: { branch?: string; defaultBranch: string } = { defaultBranch: "" },
+): string | null {
   const reasons: string[] = []
+
+  // The branch, before anything about the plan. A workflow condition that names the wrong
+  // branch is one line, and it is the line that decides what production becomes: the first
+  // unattended deploy of a real project skipped on the merge it existed for, because the
+  // condition compared against GitHub's default branch while releases came from another one.
+  // A person can still deploy any branch with a token; nobody watching cannot.
+  if (where.defaultBranch) {
+    if (!where.branch) {
+      reasons.push(`the branch is unknown, and only ${where.defaultBranch} deploys unattended`)
+    } else if (where.branch !== where.defaultBranch) {
+      reasons.push(`this is ${where.branch}, and only ${where.defaultBranch} deploys unattended`)
+    }
+  }
 
   // The agreed policy, in its own order.
   if (plan.destructive) {

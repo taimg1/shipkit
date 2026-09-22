@@ -397,12 +397,17 @@ export function translate(key, opts, ctx) {
       if (opts.plan) return ["deploy-plan", ...target, ...credentials(opts, ctx.env), ...stage]
       // Recorded in the server-side deploy lock, so a refused deploy can say who holds it.
       const actor = ctx.env.GITHUB_ACTOR || ctx.env.USER || ctx.env.USERNAME
+      // The same branch `ci` publishes from, computed the same way. An unattended deploy that
+      // is not on the release branch is refused by the module: a workflow condition naming the
+      // wrong branch is a one-line mistake, and it deployed a branch nobody released.
+      const branch = publishBranch(ctx.env, opts.branch, ctx.branch)
       const execute = (approval) => [
         "deploy",
         ...target,
         ...credentials(opts, ctx.env, { dbUrl: true }),
         approval,
         ...stage,
+        ...(branch ? [`--branch=${branch}`] : []),
         ...(actor ? [`--actor=${actor}`] : []),
       ]
       // The module decides whether this plan may approve itself, and refuses with exit 4 and the

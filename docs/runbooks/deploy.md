@@ -235,6 +235,23 @@ old container, a failed `verify` still rolls back, and `--auto` still refuses a 
 a missing image, a `--stage` selection or anything to provision. `ready:` is optional for
 these projects only because there is no database for readiness to prove.
 
+## Two things a first setup gets wrong
+
+Both were found on the first unattended deploy of a real project, and both stop the run rather
+than release the wrong thing — but knowing them saves the round trip.
+
+**The branch in the workflow condition is the one `defaultBranch` names in shipkit.yaml**, not
+`github.event.repository.default_branch`. Those are different: a repository whose GitHub
+default is `dev` while releases come from `main` skips the deploy on exactly the merge it
+exists for. The kit refuses an unattended deploy from any other branch as well, so a wrong name
+is caught either way — as a skipped job in one direction and as exit 4 in the other.
+
+**`.kamal/secrets` belongs in the repository.** It holds references — `NAME=$NAME` — and never
+values, and a deploy from a workstation reads the untracked copy quite happily. A runner checks
+out the repository, so an ignored file is simply absent there, and the deploy refuses with
+`config/deploy.yml declares secrets ... but .kamal/secrets is not in the repository`. The values
+live in the CI secret store; the file that names them lives in git.
+
 ## A deploy lock that was left behind
 
 The lock is released by the run that took it. If that run was killed — the terminal closed,

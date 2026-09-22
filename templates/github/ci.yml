@@ -199,9 +199,15 @@ jobs:
     # that stopped waiting for the browser suite because someone edited a different job's
     # `needs:` is exactly the kind of quiet loss this file exists to prevent.
     needs: [image, e2e]
-    # Only a push, only to the branch that publishes. A tag never reaches here — `on:` filters
-    # it, and a tag's ref_name is not a branch name either — and a pull request never does.
-    if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+    # Only a push, only to the branch that publishes — the `defaultBranch` in shipkit.yaml,
+    # written out here because a job condition cannot read that file. Change both together.
+    #
+    # NOT github.event.repository.default_branch: that is GitHub's default branch, which is a
+    # different thing. The first project to use this had `dev` as its GitHub default and
+    # released from `main`, so the deploy skipped on the merge it exists for. The kit refuses
+    # an unattended deploy from any other branch anyway (core/auto-approve.ts), so a wrong name
+    # here stops the run rather than releasing the wrong thing — but it stops it late.
+    if: github.event_name == 'push' && github.ref_name == 'main'
     runs-on: ubuntu-latest
     # One deploy at a time. Two merges landing a minute apart would otherwise migrate the same
     # database from two runners at once; the module's server-side lock refuses the second, and

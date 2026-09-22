@@ -4,6 +4,7 @@ import { configError, notImplemented } from "./errors.js"
 import { hostKeyHint, parseKnownHosts } from "./core/known-hosts.js"
 import { configProblem } from "./config-validate.js"
 import { parseBuildArgs } from "./build-args.js"
+import { E2eConfig, parseE2e } from "./e2e-config.js"
 import { stackConfigProblem, stackRequirements, stackVersionText } from "./adapters/requirements.js"
 import { parseRetention } from "./core/backup-store.js"
 import { DEFAULT_MIGRATION_TIMEOUTS, MigrationTimeouts, pgDuration } from "./core/migrate-options.js"
@@ -97,6 +98,14 @@ export interface Config {
    */
   buildArgs: Record<string, string>
   /**
+   * The browser-test stage, from `e2e:` in shipkit.yaml. Absent when the project configures
+   * none: there is then no `e2e` stage, no browsers image pulled and no service started.
+   *
+   * It is a block rather than a set of top-level keys because it is all-or-nothing — a command
+   * with no image to run in, or an image with no command, is not half a stage.
+   */
+  e2e?: E2eConfig
+  /**
    * How many verified pre-deploy dumps to keep on the server, per service. Older ones are
    * deleted after each new one is stored. Default 10.
    */
@@ -182,6 +191,7 @@ export async function loadConfig(source: Directory): Promise<Config> {
     lint: c.lint,
     db,
     stackVersion: c.stackVersion,
+    e2e: c.e2e,
   })
   if (stackProblem) throw configError(stackProblem.message, stackProblem.next)
   const requirements = stackRequirements(stack)
@@ -200,6 +210,9 @@ export async function loadConfig(source: Directory): Promise<Config> {
 
   const verifyCfg = verifySettings(c, db)
   if (!verifyCfg.ok) throw configError(verifyCfg.message, verifyCfg.next)
+
+  const e2e = parseE2e(c.e2e)
+  if (!e2e.ok) throw configError(e2e.message, e2e.next)
 
   const service = (c.service as string) ?? ""
   const retention = parseRetention(c.backupRetention)
@@ -287,6 +300,7 @@ export async function loadConfig(source: Directory): Promise<Config> {
     buildArgs: buildArgsOrThrow(c.buildArgs),
     defaultBranch: (c.defaultBranch as string) ?? "main",
     publish: c.publish === undefined ? true : c.publish === true,
+    e2e: e2e.e2e ?? undefined,
     backupRetention: retention.value,
     environments,
     migrationTimeouts,

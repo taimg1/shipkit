@@ -2,7 +2,7 @@ import { dag, CacheSharingMode, Container, Directory, Service } from "@dagger.io
 import { Config } from "../config.js"
 import { configError, infraError } from "../errors.js"
 import { StackAdapter, TestSummary } from "./types.js"
-import { parseVitestSummary } from "./next-parse.js"
+import { parsePlaywrightSummary, parseVitestSummary } from "./next-parse.js"
 
 const nodeImage = (version: string) => `node:${version}-alpine`
 const SRC = "/src"
@@ -97,5 +97,33 @@ export class NextAdapter implements StackAdapter {
 
   parseTestSummary(raw: string): TestSummary | null {
     return parseVitestSummary(raw)
+  }
+
+  /**
+   * The project's dependencies, installed into the browsers image the core pulled.
+   *
+   * The browsers image carries the browsers and their system libraries and nothing of the
+   * project — @playwright/test, the config and the specs all come from the repository, by the
+   * same `npm ci` as `restore`, so the suite runs against the versions package-lock.json pins
+   * rather than whatever the image happens to ship.
+   *
+   * Not `restore()` itself: that one runs on `node:<version>-alpine`, which has no browsers,
+   * and swapping its base would mean linting and unit-testing inside a 2 GB image on every run.
+   */
+  e2e(browsers: Container, src: Directory): Container {
+    return browsers
+      .withDirectory(SRC, src.withoutDirectory(".next"))
+      .withWorkdir(SRC)
+      .withEnvVariable("NEXT_TELEMETRY_DISABLED", "1")
+      .withEnvVariable("CI", "true")
+      // The browsers are in the image already; downloading them again is minutes per run, and
+      // it is what a project's postinstall or `playwright install` would do unasked.
+      .withEnvVariable("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1")
+      .withMountedCache("/root/.npm", dag.cacheVolume("npm"), { sharing: CacheSharingMode.Shared })
+      .withExec(["npm", "ci"])
+  }
+
+  parseE2eSummary(raw: string): TestSummary | null {
+    return parsePlaywrightSummary(raw)
   }
 }

@@ -12,7 +12,7 @@
  */
 
 /** Pipeline order, so the table reads top to bottom regardless of which job finished first. */
-export const CI_STAGE_ORDER = ["pre", "build", "test", "db", "push"]
+export const CI_STAGE_ORDER = ["pre", "build", "test", "e2e", "db", "push"]
 
 /** The deploy's own order (ADR 0004). A deploy report is rendered by this same file. */
 export const DEPLOY_STAGE_ORDER = ["provision", "backup", "migrate", "release", "verify", "rollback", "clean"]

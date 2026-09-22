@@ -19,8 +19,9 @@ it has leaked into the wrong layer.
 ## Commands
 
 ```
-shipkit ci                      # pre → build → test → db → push
+shipkit ci                      # pre → build → test → e2e → db → push
 shipkit ci --stage db           # one stage, for a fast loop
+shipkit ci --stage build,e2e    # the browser suite against the image this run built
 shipkit db lint                 # Squawk on pending migrations only — seconds, not minutes
 shipkit db pending              # which migrations are not on main / not on prod
 shipkit deploy --plan           # what would happen; exit 0, touches nothing

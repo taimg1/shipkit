@@ -95,6 +95,78 @@ ready: /health/ready
 # ready yet — before the release is declared failed and rolled back. Seconds, 1–600.
 verifyTimeout: 60
 
+# The browser tests, and what has to be running for them. Leave the whole block out and
+# there is no `e2e` stage: no browsers image is pulled, no service is started, and the report
+# says "skipped: not configured" rather than passing silently.
+#
+# The stage runs after `build` and serves the image that run produced — not a rebuild of it.
+# The base URL is the kit's to hand over, so the tests cannot be pointed somewhere else.
+# A command that is configured and finds no tests FAILS: a suite that discovered nothing exits
+# 0, and a green gate that checked nothing is the worst kind of green.
+#
+# e2e:
+#   # The project's own runner, through `npx --no-install`: plain `npx` would download whatever
+#   # the registry publishes under that name, and a gate that installs its own tool is not
+#   # checking the project's.
+#   command: npx --no-install playwright test
+#
+#   # The browsers image. It MUST match the @playwright/test version package-lock.json pins —
+#   # a mismatch is a suite that fails for reasons the change did not cause. That is why the
+#   # kit does not choose it. Name a version, never a moving tag; a digest is better still, and
+#   # `docker buildx imagetools inspect mcr.microsoft.com/playwright:v1.63.0-noble` prints one.
+#   image: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:REPLACE_WITH_DIGEST
+#
+#   # The port the built image listens on — the Dockerfile's EXPOSE — and the path it answers
+#   # 2xx on once it is serving. Neither is guessed: the kit waits for `ready` before the suite
+#   # starts, so a site that never came up fails as that rather than as assertion errors.
+#   port: 3000
+#   ready: /health
+#   # Seconds the command may take. Default 600, maximum 3600.
+#   timeout: 600
+#
+#   # The kit puts the URL it is serving in E2E_BASE_URL — always that name, and the project's
+#   # suite reads it. It is plain HTTP on an internal host: http://shipkit-app:<port>. The
+#   # hyphen in that name is not decoration — `app` and `dev` are gTLDs on Chrome's HSTS preload
+#   # list, and a browser matching a bare `app` against one forces https:// and fails every
+#   # navigation with ERR_SSL_PROTOCOL_ERROR.
+#
+#   # What the served image is given while the stage runs, so it can reach the services below
+#   # by name. Kamal supplies these in production. Public, test-only values — not secrets, and
+#   # E2E_BASE_URL may not be set here.
+#   env:
+#     DATABASE_URL: postgres://postgres:postgres@db:5432/app
+#
+#   # Optional. Everything else the tests need: the kit starts each one, binds it under its name
+#   # so the app and the tests reach it there, waits for it, and passes the registry credential
+#   # through for an image from your own registry. It never learns what any of them IS.
+#   #
+#   # A suite that only checks layout, overflow, broken images and the console needs none of
+#   # this — leave `services:` out entirely.
+#   services:
+#     - name: db
+#       # A version you pinned. A bare name, or latest / main / master / edge, is refused: a tag
+#       # somebody else can move makes one commit mean two different runs, and the kit does not
+#       # do that quietly. @sha256:… pins it harder.
+#       image: postgres:17-alpine
+#       port: 5432
+#       env:
+#         POSTGRES_USER: postgres
+#         POSTGRES_PASSWORD: postgres
+#         POSTGRES_DB: app
+#       # The data the tests assert on, from a file in your repository. There is no default:
+#       # an empty database answers every query with no rows, so the site renders empty pages,
+#       # returns 200, and the suite goes green having proved nothing.
+#       # Mounted at /docker-entrypoint-initdb.d/10-shipkit.sql, which the postgres, mysql and
+#       # mariadb images run on first boot. The kit never reads it and never runs it.
+#       initSql: ci/e2e-seed.sql
+#     # `ready` is an HTTP path for a service that speaks HTTP. Left out, readiness is a TCP
+#     # connect — all the kit can honestly check for a protocol it does not know, which is why
+#     # the database above has none.
+#     - name: api
+#       image: ghcr.io/client/api:sha-1a2b3c4
+#       port: 8080
+#       ready: /health
+
 environments:
   prod:
     url: https://api.client.com

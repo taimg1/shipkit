@@ -6,3 +6,8 @@ node_modules
 # stage's cache and, for anything under public/, into the image.
 shipkit.yaml
 README.md
+
+# The browser suite and its config. They are the e2e stage's input, not the image's: the kit
+# mounts the repository into the browsers image separately.
+e2e
+playwright.config.ts

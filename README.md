@@ -35,7 +35,10 @@ running the first deploy by hand.
 
 ## Pipelines
 
-- `dagger call ci` — `pre` → `build` → `test` → `db` → `push`. Runs on every push and PR.
+- `dagger call ci` — `pre` → `build` → `test` → `e2e` → `db` → `push`. Runs on every push and
+  PR. `e2e` serves the image `build` just produced, starts whatever the browser tests need, and
+  runs the project's own suite against it; with no `e2e:` block in shipkit.yaml it is skipped
+  with that reason and costs nothing.
 - `dagger call deploy` — `backup` → `migrate` → `release` → `verify` → `rollback` → `clean`.
   Without `--yes` it prints target, image version, pending migrations and the SQL diff,
   then waits for confirmation.

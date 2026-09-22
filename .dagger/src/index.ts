@@ -12,6 +12,7 @@ import { resolveTargetFramework, targetFrameworkSources } from "./adapters/dotne
 import { EXIT, ShipkitError, configError, gateError, infraError, notImplemented } from "./errors.js"
 import { ReportBuilder, execOutput, serialize, withDetail } from "./report.js"
 import { dbStage } from "./core/db.js"
+import { e2eStage } from "./core/e2e.js"
 import { postgresService } from "./core/postgres.js"
 import { push as pushImage } from "./core/push.js"
 import { backup as backupProduction, BackupResult } from "./core/backup.js"
@@ -58,7 +59,12 @@ async function resolveTarget(source: Directory, env: string) {
 }
 import { noTestsRan, rollbackFailed, testsFailed } from "./core/gates.js"
 
-const CI_STAGES = ["pre", "build", "test", "db", "push"]
+/**
+ * `e2e` sits after `build` because it needs the image that run produced — the container, not a
+ * rebuild of it — and before `db` and `push` so that a suite which fails stops the run before
+ * anything is published.
+ */
+const CI_STAGES = ["pre", "build", "test", "e2e", "db", "push"]
 const DEPLOY_STAGES = ["provision", "backup", "migrate", "release", "verify", "rollback", "clean"]
 
 /** Deploy stages that only read production, so selecting them needs no plan token. */
@@ -147,7 +153,7 @@ async function refuseEmptySecrets(source: Directory, kamalSecrets?: Secret): Pro
 @object()
 export class Shipkit {
   /**
-   * The `ci` pipeline: pre -> build -> test -> db -> push.
+   * The `ci` pipeline: pre -> build -> test -> e2e -> db -> push.
    * Runs on every push and pull request.
    */
   @func()
@@ -229,6 +235,29 @@ export class Shipkit {
           return withDetail(summary, { tests: summary })
         })
       } else r.skip("test", "not selected")
+
+      if (only("e2e")) {
+        if (!cfg.e2e) {
+          // Skipped visibly, with the reason. A project with no browser tests pays nothing for
+          // the stage — no browsers image, no services — but the report still says it did not
+          // run and why (ADR 0004).
+          r.skip("e2e", "not configured")
+        } else if (!image) {
+          // Refused, not skipped. `--stage=e2e` on its own has no image to serve, and a stage
+          // that quietly tested nothing is exactly what this one exists to prevent.
+          await r.stage("e2e", async () => {
+            throw configError(
+              "the e2e stage needs the image built in the same run, and build did not run",
+              "Select them together: --stage=build,e2e. The image is passed in memory, so it " +
+                "cannot be picked up from a build that happened in another job.",
+            )
+          })
+        } else {
+          await r.stage("e2e", () =>
+            e2eStage(source, cfg, cfg.e2e!, adapter, image!, { token: registryToken, user: registryUser }),
+          )
+        }
+      } else r.skip("e2e", "not selected")
 
       if (only("db")) {
         if (cfg.db === "none" || !adapter.db) {

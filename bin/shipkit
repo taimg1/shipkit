@@ -41,7 +41,7 @@ import { deploymentStatus } from "./deployment.mjs"
 const USAGE = `
 shipkit — CI/CD for turnkey client projects
 
-  shipkit ci [--stage <name>]        pre -> build -> test -> db -> push
+  shipkit ci [--stage <name>]        pre -> build -> test -> e2e -> db -> push
     [--migration-base <id>]          diff base (default: newest migration on origin/<defaultBranch>)
   shipkit db lint                    Squawk on pending migrations only
   shipkit db pending                 migrations not on the default branch

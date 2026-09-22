@@ -73,6 +73,52 @@ export const noTestsRan = (detail: string) =>
   )
 
 /**
+ * Gate 3e — the e2e command outlived its budget.
+ *
+ * Reported as its own failure rather than as "exit 124": a suite that hangs on a page that
+ * never loads and a suite that is simply slow look identical in an exit code, and only one of
+ * them is fixed by raising `timeout`.
+ */
+export const e2eTimedOut = (seconds: number, command: string) =>
+  new GateFailure(
+    "e2e",
+    `the e2e command did not finish within ${seconds}s: ${command}`,
+    "Either the suite is slower than e2e.timeout in shipkit.yaml, or something it waits for " +
+      "never answers. The output above is everything the run printed before it was stopped.",
+  )
+
+/**
+ * Gate 3g — the e2e runner ended without printing any counts.
+ *
+ * Distinct from "it found no tests": that one is a discovery problem with a known answer, this
+ * one is a run that never got far enough to say anything. Reporting it as zero tests would
+ * send the reader to look at test discovery for what is usually a crash.
+ */
+export const e2eNoSummary = (command: string) =>
+  new GateFailure(
+    "e2e",
+    `the e2e run printed no test counts: ${command}`,
+    "The run ended before the runner reported anything — a crash, a configuration error, or a " +
+      "reporter that prints no summary. Its output is above. Failing closed: a run nobody can " +
+      "count is not a pass.",
+  )
+
+/**
+ * Gate 3f — the application, or something it was given, never came up.
+ *
+ * Failing here rather than running the tests anyway: a suite pointed at a dead URL reports
+ * dozens of failures that all have one cause, and buries it.
+ */
+export const e2eNotReady = (target: string) =>
+  new GateFailure(
+    "e2e",
+    `nothing answered at ${target} before the e2e stage gave up`,
+    "For the app: it is the image this run built, so it is failing to start or its health path " +
+      "is wrong. For a declared service: check its image tag, its env and its port in the e2e: " +
+      "block. The container's own output is above.",
+  )
+
+/**
  * Gate 1d — the migration list and the generated SQL disagree.
  *
  * Almost always a stale assembly: `dotnet ef migrations add` does not rebuild, so `--no-build`

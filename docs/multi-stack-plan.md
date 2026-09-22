@@ -217,8 +217,36 @@ Next.js is the odd one out: it may have no database, and it may not need a serve
   `prettier --check` is *not* run. A project that formats with Prettier configures its linter
   to say so; adding a second tool the kit assumes is installed would fail every project that
   does not have it.
-- `test`: `vitest` for unit; Playwright for e2e is **out of scope for `ci`** — it belongs in
-  `verify` against the live URL if at all, otherwise it doubles CI time for every push.
+- `test`: `vitest` for unit. **Playwright for e2e is now a stage of `ci`** — this reverses the
+  decision recorded here, which was "out of scope for `ci`; it belongs in `verify` against the
+  live URL if at all".
+
+  What changed is what it would have tested. `verify` runs *after* the release, against
+  production: a suite that fails there has already let the bad image out, and gate 4 already
+  answers the only question that can be usefully asked that late (is the right version serving,
+  and can it reach its database). The first real Next consumer walks 32 routes in two viewports,
+  and the failures worth catching — a page that renders with no data, a route that 500s because
+  the API it reads is not there — are all visible against the image *before* it is published.
+  Doing it in `ci` also makes the run reproducible: the image is the commit, and the services it
+  talks to are pinned in shipkit.yaml rather than being whatever production had that minute.
+
+  The cost objection stands and is answered by the stage costing nothing when it is not
+  configured: no `e2e:` block, no browsers image, no services, and a report entry that says
+  "skipped: not configured". It is configured per project, not per stack.
+
+  `e2e:` names the command, the browsers image, the port and readiness path of the built image,
+  a timeout, the environment the image is served with, and optionally the services the tests
+  need (`.dagger/src/e2e-config.ts`). The core serves the built image at `E2E_BASE_URL` —
+  always that name, read by the project's suite — waits for `ready`, starts each service and
+  binds it under its `name` to both the app and the runner, and runs the command. It never
+  learns what any service is (ADR 0008): it pulls an image, mounts `initSql` at one fixed path,
+  and waits for a port. A configured command that finds no tests fails the stage, for the same
+  reason a `vitest` run that discovers nothing does.
+
+  The browsers image is the project's to name, not the kit's: it has to match the
+  `@playwright/test` the repository locks, and a mismatch is a suite that fails for reasons the
+  change did not cause. Its tag, and every service image's, must name a version — `latest`,
+  `main`, `master` and `edge` are refused at config load.
   Vitest is run with `--passWithNoTests`, which is not a relaxation: without it a run that
   discovers nothing exits 1 with no counts, and the core can only report an exit code. With
   it the run reports zero tests, and the core fails it as "no tests ran" — the same refusal

@@ -100,6 +100,31 @@ jobs:
           path: reports/tests.json
           if-no-files-found: warn
 
+  # The browser suite, against the image this run built. Delete this job on a project with no
+  # `e2e:` block in shipkit.yaml: the stage would skip with "not configured", and the build
+  # below would have run for nothing.
+  #
+  # `--stage=build,e2e` and not `--stage=e2e`: the stage serves the container `build` produced,
+  # in memory, so the two have to be in one job. The image is therefore built twice per run —
+  # the price of testing the artifact that would be deployed instead of the sources it came
+  # from. Dagger caches the build, so the second one is usually a cache hit on the same runner
+  # and a rebuild across runners.
+  e2e:
+    name: End-to-end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup
+      - run: node "$SHIPKIT" ci --stage=build,e2e --report=reports/e2e.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: report-e2e
+          path: reports/e2e.json
+          if-no-files-found: warn
+
   # Squawk on the pending SQL, then the migrations applied to a seeded copy of the schema and
   # the rows counted. Delete this job on a project with `db: none` — or rather, copy ci-no-db.yml,
   # which is this file with the job and its two `needs:` entries already gone.
@@ -124,7 +149,7 @@ jobs:
   image:
     name: Image
     runs-on: ubuntu-latest
-    needs: [analysis, tests, migrations]
+    needs: [analysis, tests, e2e, migrations]
     permissions:
       contents: read
       # Needed because shipkit.yaml says `publish: true`: the push stage uploads the image with
@@ -293,7 +318,7 @@ jobs:
     # that takes minutes. The deploy renders its own summary, in its own job, from its own
     # report — and a deploy report merged into this table would be a second pipeline's stages
     # in a table titled CI.
-    needs: [analysis, tests, migrations, image]
+    needs: [analysis, tests, e2e, migrations, image]
     # The summary exists for the runs that failed. Skipping it when a job fails would remove it
     # from exactly the runs that need it.
     if: always()

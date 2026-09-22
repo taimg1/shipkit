@@ -478,9 +478,7 @@ export class Shipkit {
         // Before anything is planned, let alone booted: every secret config/deploy.yml declares
       // must have a value. Kamal resolves a name it cannot find to an empty string and deploys
       // it, and only PostgreSQL is rude enough to refuse to start over one (#19).
-      if (cfg.delivery === "kamal") {
-        await refuseEmptySecrets(source, kamalSecrets)
-      }
+      await refuseEmptySecrets(source, kamalSecrets)
 
       const plan = await buildPlan(
         source, cfg, env, target, adapter, sha, sshKey, cfg.health, registryToken, registryUser,
@@ -965,7 +963,7 @@ export class Shipkit {
       }
 
       // The kit and Kamal both SSH to the server; they must agree on how (#15).
-      if (cfg.delivery === "kamal") {
+      {
         let kamal: KamalSsh | null = null
         try {
           const deployYml = await source.file("config/deploy.yml").contents()
@@ -983,7 +981,7 @@ export class Shipkit {
       // Kamal's service name is duplicated between shipkit.yaml and config/deploy.yml.
       // Duplication is tolerable when something checks it; silent drift here means an image
       // that builds, publishes, and then cannot be deployed.
-      if (cfg.delivery === "kamal") {
+      {
         try {
           const deployYml = await source.file("config/deploy.yml").contents()
           const declared = /^service:[ \t]*(\S+)[ \t]*$/m.exec(deployYml)?.[1]

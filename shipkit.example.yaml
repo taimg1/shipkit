@@ -14,7 +14,9 @@ service: client-api
 
 stack: dotnet          # dotnet | next  (nest and custom have no adapter yet)
 db: postgres           # postgres | none — "none" is required for a stack with no DB adapter
-delivery: kamal        # kamal | static
+delivery: kamal        # kamal. `static` is planned (multi-stack-plan §7 step 5) and refused
+                       # until it exists: a delivery model that loads but is not built would
+                       # deploy through Kamal with one gate quietly switched off.
 
 # What a stack requires of this file is the stack's own business
 # (.dagger/src/adapters/requirements.ts), and what it does not require it refuses:

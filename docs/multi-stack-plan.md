@@ -109,7 +109,7 @@ Configuration lives in the **client repo**, not the kit:
 # shipkit.yaml
 stack: next            # dotnet | next (nest and custom have no adapter yet)
 db: none               # postgres | none
-delivery: kamal        # kamal | static
+delivery: kamal        # kamal; `static` is refused until step 5 builds it
 health: /api/health
 lint: eslint           # next: which linter `pre` runs
 ```
@@ -197,8 +197,11 @@ Next.js is the odd one out: it may have no database, and it may not need a serve
   silently omit them.
 - **Full-stack Next.js with Prisma/Drizzle** → the Nest DB adapter is reused as-is; nothing
   about it is Nest-specific.
-- **Pure static** (`output: 'export'`) → `delivery: static`. `ci` runs unchanged; `deploy`
-  becomes "upload the export". Free tiers of static hosts frequently forbid commercial use
+- **Pure static** (`output: 'export'`) → `delivery: static`, **which does not exist yet**:
+  shipkit.yaml refuses it with exit 5 rather than loading it and deploying through Kamal
+  anyway, which is what it used to do — with the "every declared secret has a value" check
+  skipped, because that check asked whether delivery was Kamal. `ci` will run unchanged;
+  `deploy` becomes "upload the export". Free tiers of static hosts frequently forbid commercial use
   (`ci-cd-plan.md` §11) — this is the one place where a paid tier is likely unavoidable.
 - **Build-time configuration.** `NEXT_PUBLIC_*` is inlined into the browser bundle by
   `next build`, so it cannot be supplied at run time the way a server variable can. It goes in

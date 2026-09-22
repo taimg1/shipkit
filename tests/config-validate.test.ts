@@ -1,5 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
+import { readFileSync } from "node:fs"
 import { configProblem } from "../.dagger/src/config-validate.ts"
 
 const env = {
@@ -98,4 +99,17 @@ test("sshPort must be a whole number in range", () => {
 
 test("a host means an sshUser that is a login name", () => {
   assert.match(configProblem(config({}, { sshUser: "" }))?.message ?? "", /sshUser/)
+})
+
+test("delivery: static is refused as unbuilt, not accepted and ignored", () => {
+  // It used to load, and the deploy then ran Kamal anyway with one difference: the check that
+  // every secret config/deploy.yml declares has a value was skipped for it. One line of
+  // configuration switched a gate off. An unbuilt delivery model fails closed instead, with
+  // the exit code that says which (5, not implemented).
+  const src = readFileSync(new URL("../.dagger/src/config.ts", import.meta.url), "utf8")
+  assert.match(src, /delivery === "static"[\s\S]{0,200}notImplemented\(/, "static no longer refused at load")
+
+  // And nothing downstream may branch on delivery again: that is how the gate was lost.
+  const index = readFileSync(new URL("../.dagger/src/index.ts", import.meta.url), "utf8")
+  assert.doesNotMatch(index, /cfg\.delivery === "kamal"/, "a delivery branch is back in the deploy path")
 })

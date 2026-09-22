@@ -1,6 +1,6 @@
 import { Directory } from "@dagger.io/dagger"
 import { parse } from "yaml"
-import { configError } from "./errors.js"
+import { configError, notImplemented } from "./errors.js"
 import { hostKeyHint, parseKnownHosts } from "./core/known-hosts.js"
 import { configProblem } from "./config-validate.js"
 import { parseBuildArgs } from "./build-args.js"
@@ -189,6 +189,13 @@ export async function loadConfig(source: Directory): Promise<Config> {
   const delivery = (c.delivery as Delivery) ?? "kamal"
   if (delivery !== "kamal" && delivery !== "static") {
     throw configError(`delivery must be "kamal" or "static"`)
+  }
+  // Refused rather than accepted-and-ignored. `static` used to load, and then the deploy ran
+  // Kamal anyway with one difference: the check that every secret config/deploy.yml declares
+  // has a value was skipped for it — a line in shipkit.yaml that switched off a gate. An
+  // unbuilt delivery model must fail closed, with the exit code that says which (exit 5).
+  if (delivery === "static") {
+    throw notImplemented("delivery: static", "M7")
   }
 
   const verifyCfg = verifySettings(c, db)

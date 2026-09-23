@@ -1,0 +1,27 @@
+# Uptime Kuma — the real deployment, on the test server (173.242.58.240).
+#
+# It watches production's public HTTPS endpoints over the internet and never touches the
+# production host itself, so it fails independently of what it watches.
+#
+# The port is bound to 127.0.0.1 only. Docker writes its own iptables rules, which bypass ufw
+# for ports published on 0.0.0.0, so ufw alone would not keep this private. Reach the UI
+# through an SSH tunnel:
+#
+#   ssh -N -L 13001:127.0.0.1:3001 testserver    # then open http://localhost:13001
+#
+# Installed at /opt/shipkit-monitoring/docker-compose.yml on the server.
+# docker-compose.yml next to this file is the local rehearsal against dev-server; leave it be.
+name: shipkit-monitoring
+
+services:
+  uptime-kuma:
+    # uptime-kuma:1, pinned by digest. To move it: docker buildx imagetools inspect louislam/uptime-kuma:1
+    image: louislam/uptime-kuma:1@sha256:70233f4acb5163fd2a59a49909cf01e44415cecff13dba69e3a86647a2919f83
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3001:3001"
+    volumes:
+      - kuma-data:/app/data
+
+volumes:
+  kuma-data:

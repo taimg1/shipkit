@@ -98,19 +98,46 @@ export function parseBundleDir(output: string): string | null {
   return /^\/tmp\/shipkit-efbundle\.[A-Za-z0-9]{6,}$/.test(dir) ? dir : null
 }
 
-/** Local command that copies the bundle into the staging directory. */
-export function copyBundleCommand(env: Environment, localPath: string, dir: string): string {
+/**
+ * `scp`, with the legacy SCP protocol asked for explicitly.
+ *
+ * OpenSSH 9 made scp speak SFTP instead, which opens a subsystem and negotiates the destination
+ * inside it — so the server is asked for a filesystem session rather than for a named file. The
+ * deploy key is restricted by a forced command that has to see where an upload is going
+ * (docs/runbooks/deploy-key.md), and over SFTP there is nothing to see. `-O` keeps the
+ * destination in the command, where it can be checked.
+ */
+export const SCP_LEGACY = "-O"
+
+/**
+ * One scp, as a local shell command. Both uploads a deploy makes go through here so that there
+ * is a single place that knows how this pipeline copies a file to the server — the deploy key's
+ * forced command checks the destination of exactly these two, and a second spelling of the
+ * command somewhere else is a second thing to keep in step with it.
+ */
+function scpCommand(env: Environment, localPath: string, remotePath: string): string {
   return [
     "scp",
+    SCP_LEGACY,
     "-i", "/root/.ssh/id_ed25519",
     "-P", String(env.sshPort),
     ...hostKeyOptions,
     "-o", "BatchMode=yes",
     localPath,
-    `${env.sshUser}@${env.host}:${dir}/efbundle`,
+    `${env.sshUser}@${env.host}:${remotePath}`,
   ]
     .map(shq)
     .join(" ")
+}
+
+/** Local command that copies the bundle into the staging directory. */
+export function copyBundleCommand(env: Environment, localPath: string, dir: string): string {
+  return scpCommand(env, localPath, `${dir}/efbundle`)
+}
+
+/** Local command that copies a verified dump to its temporary name in the backup directory. */
+export function copyDumpCommand(env: Environment, localPath: string, remotePath: string): string {
+  return scpCommand(env, localPath, remotePath)
 }
 
 /**

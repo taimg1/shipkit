@@ -29,8 +29,22 @@ and keep your own.
 ## 2. prepare
 
 ```bash
-ssh root@HOST 'bash -s' -- prepare --key "$(cat ~/.ssh/shipkit_deploy.pub)" < server/bootstrap.sh
+scp ~/.ssh/shipkit_deploy.pub root@HOST:/tmp/deploy.pub
+ssh root@HOST 'bash -s' -- prepare --key-file /tmp/deploy.pub < server/bootstrap.sh
 ```
+
+Two steps rather than one, and the reason is worth knowing before you improvise a shorter
+version. Everything after `bash -s --` is joined by `ssh` into a single string and parsed by a
+shell *on the server*, so the quoting you wrote locally is gone by the time it arrives. The
+obvious one-liner — `--key "$(cat ~/.ssh/shipkit_deploy.pub)"` — therefore fails outright for
+any key whose comment contains a space or a bracket:
+
+```
+bash: -c: line 1: syntax error near unexpected token `('
+```
+
+which is what `ssh-keygen -C 'shipkit deploy (test vps-1)'` gives you. A path has nothing in it
+for a shell to misread. `--key` still exists for a key with a single-word comment.
 
 | | |
 |---|---|

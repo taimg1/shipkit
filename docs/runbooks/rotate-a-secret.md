@@ -43,6 +43,18 @@ ssh <user>@<host> 'nano ~/.ssh/authorized_keys'   # remove the old entry
 
 Delete the private key from your machine afterwards.
 
+On a server where `server/bootstrap.sh restrict` has been run, the key sshd reads is the
+root-owned copy in `/etc/ssh/authorized_keys.d/<user>`, not the one in the user's home — so
+appending to `~/.ssh/authorized_keys` adds a key that does not work yet. Add it there anyway
+(that file is what the undo falls back to), then run `restrict` again to copy it across:
+
+```bash
+ssh root@<host> 'bash -s' -- restrict --user <user> < server/bootstrap.sh
+```
+
+What the key is allowed to do once it is in, and how to get back in when the restriction is
+the thing in the way, is [deploy-key](deploy-key.md).
+
 ## Rotating the database passwords
 
 There are two roles, and they rotate separately: the owner, which only the migration bundle

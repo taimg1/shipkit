@@ -12,6 +12,7 @@ Written to be read when something is wrong, by someone who did not build this.
 | [e2e](e2e.md) | the browser suite is red, green on a broken page, or not configured yet |
 | [registry](registry.md) | the image will not publish, or the server will not pull it |
 | [rotate-a-secret](rotate-a-secret.md) | a key or password changes |
+| [deploy-key](deploy-key.md) | the deploy key refuses something, or you are restricting it |
 | [monitoring](monitoring.md) | setting up Uptime Kuma, and what it cannot tell you |
 
 Records of what the pipeline actually did, kept as evidence rather than instruction:

@@ -3,7 +3,8 @@ import { Environment } from "../config.js"
 import { backupUnverified } from "./gates.js"
 import { infraError } from "../errors.js"
 import { PG_IMAGE, PG_PASSWORD, PG_USER, postgresService } from "./postgres.js"
-import { hostKeyOptions, remoteScript, shq, sshContainer } from "./ssh.js"
+import { remoteScript, shq, sshContainer } from "./ssh.js"
+import { copyDumpCommand } from "./ssh-command.js"
 import {
   TABLE_COUNT,
   backupDir,
@@ -239,17 +240,10 @@ async function persist(
   const name = backupFileName(store.sha, new Date())
   const path = `${dir}/${name}`
   const temp = `${dir}/.${name}.partial`
-  const scp = [
-    "scp",
-    "-i", "/root/.ssh/id_ed25519",
-    "-P", String(env.sshPort),
-    ...hostKeyOptions,
-    "-o", "BatchMode=yes",
-    "/backup/dump.pgc",
-    `${env.sshUser}@${env.host}:${temp}`,
-  ]
-    .map(shq)
-    .join(" ")
+  // Built by core/ssh-command.ts rather than spelled out here: the deploy key's forced command
+  // checks where an upload is going, and two spellings of the same scp is how that check starts
+  // disagreeing with what is actually sent (docs/runbooks/deploy-key.md).
+  const scp = copyDumpCommand(env, "/backup/dump.pgc", temp)
 
   // The digest is compared before the rename: a dump that arrived different from the one that
   // was restored is not the verified dump.

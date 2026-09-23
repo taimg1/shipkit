@@ -13,6 +13,7 @@ Written to be read when something is wrong, by someone who did not build this.
 | [registry](registry.md) | the image will not publish, or the server will not pull it |
 | [rotate-a-secret](rotate-a-secret.md) | a key or password changes |
 | [monitoring](monitoring.md) | setting up Uptime Kuma, and what it cannot tell you |
+| [status-hub](status-hub.md) | the Telegram bot stopped answering, or a server is watched/unwatched |
 
 Records of what the pipeline actually did, kept as evidence rather than instruction:
 

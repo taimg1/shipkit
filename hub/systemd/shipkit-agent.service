@@ -1,0 +1,22 @@
+[Unit]
+Description=shipkit status agent — collect one snapshot and push it to the hub
+Documentation=file:///usr/local/lib/shipkit-agent/agent
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/shipkit-agent/agent.env
+ExecStart=/usr/local/lib/shipkit-agent/agent
+# Root, because the snapshot reads the deploy user's Kamal audit log and talks to the Docker
+# socket. It writes nothing anywhere: the only output is the payload on the SSH connection.
+User=root
+ProtectSystem=strict
+PrivateTmp=yes
+NoNewPrivileges=yes
+# The timer fires every minute; a run that is still going after 45s is stuck, not slow, and
+# letting it overlap the next one would queue connections to a hub that is already not answering.
+TimeoutStartSec=45
+
+[Install]
+WantedBy=multi-user.target

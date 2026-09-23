@@ -1,0 +1,28 @@
+[Unit]
+Description=shipkit status hub — Telegram bot
+Documentation=file:///usr/local/lib/shipkit-hub/bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=shipkit-bot
+Group=shipkit-bot
+# Read as root before the unit drops to shipkit-bot, so the token file stays 0600 root and
+# the bot user has no permission to open it.
+EnvironmentFile=/etc/shipkit-hub/telegram.env
+ExecStart=/usr/local/lib/shipkit-hub/bot
+Restart=always
+RestartSec=10
+# The bot reads snapshots and writes only its own state. Nothing else on the box is its business.
+ReadWritePaths=/var/lib/shipkit-hub/state
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

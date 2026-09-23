@@ -44,3 +44,6 @@ dev-server/.ssh/
 
 # Orca/Claude scratch worktrees, never repository content
 .claude/worktrees/
+
+# hub/ is Python; running its tests leaves bytecode next to the sources.
+__pycache__/

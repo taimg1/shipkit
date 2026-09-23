@@ -933,3 +933,27 @@ case "$PHASE" in
   check)      report_state "$USER_NAME" ;;
   *)          usage ;;
 esac
+
+# ---- status hub hook --------------------------------------------------------------------
+# Additive and in one block on purpose: this file is being rewritten on another branch, and a
+# block appended at the end merges cleanly where an edit inside prepare() would not.
+#
+# The agent is not installed from here. hub/agent-install.sh needs the hub's host-key
+# fingerprint and the hub/ directory, and this script is piped in over ssh with neither. So
+# this is a pointer, printed at the moment someone is looking at a freshly prepared server.
+case "$PHASE" in
+  prepare|harden)
+    cat <<'HUB'
+
+To have this server report to the status hub (docs/runbooks/status-hub.md):
+
+  ssh root@<hub> 'ssh-keyscan -t ed25519 localhost 2>/dev/null | ssh-keygen -lf -'
+  tar -cz hub | ssh root@<this server> 'mkdir -p /tmp/agent-src && tar -xz -C /tmp/agent-src'
+  ssh root@<this server> 'bash /tmp/agent-src/hub/agent-install.sh --name <name> \
+      --hub <hub> --hub-fingerprint SHA256:... --service <service> --health-url <url>'
+
+Then authorise the key it prints, on the hub:  shipkit-hub-client add <name> '<key>'
+HUB
+    ;;
+esac
+# ---- end status hub hook ----------------------------------------------------------------

@@ -1,0 +1,14 @@
+[Unit]
+Description=shipkit status agent — once a minute
+Documentation=file:///usr/local/lib/shipkit-agent/agent
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+# systemd's default accuracy is a minute, which on a once-a-minute timer is enough drift to
+# push a snapshot past the hub's three-minute silence threshold on its own.
+AccuracySec=5s
+Unit=shipkit-agent.service
+
+[Install]
+WantedBy=timers.target

@@ -14,6 +14,7 @@ Written to be read when something is wrong, by someone who did not build this.
 | [rotate-a-secret](rotate-a-secret.md) | a key or password changes |
 | [deploy-key](deploy-key.md) | the deploy key refuses something, or you are restricting it |
 | [monitoring](monitoring.md) | setting up Uptime Kuma, and what it cannot tell you |
+| [status-hub](status-hub.md) | the Telegram bot stopped answering, or a server is watched/unwatched |
 
 Records of what the pipeline actually did, kept as evidence rather than instruction:
 

@@ -9,7 +9,7 @@ A note on how it went wrong before: this document was overwritten with a copy of
 readers here for the truth. A status file that duplicates a plan says what was intended, not
 what happened. If you find the two agreeing word for word again, this one is the lie.
 
-Last revised 2026-09-22.
+Last revised 2026-09-23.
 
 ## Verified — run, watched, and reproducible
 
@@ -50,17 +50,32 @@ holds.
 
 **Host-key pinning**, for both the kit's own SSH and Kamal's: a wrong key is refused by both.
 
-## Not verified — no one has done this
+**Restoring a production backup.** Drilled on 2026-09-22: a dump production wrote was restored
+into a scratch container beside the live database — `pg_restore` exited 0 in 0.261 s, and the
+result matched production row for row (17 tables, 190 rows, identical migration history). The
+restore into the live database itself has not been done, deliberately. `docs/runbooks/restore.md`
+records the drill and the four defects it found in the runbook.
 
-**Restoring a backup on a real server.** The drill has been run against `dev-server` only. The
-dumps production writes have never been restored anywhere, and nobody has measured how long it
-would take. `docs/runbooks/restore.md` is therefore a plan, not a procedure.
+**Monitoring.** Uptime Kuma runs on the test server, a different machine from the one it
+watches, and checks both production endpoints and their certificates. Alerts go to Telegram.
+Separately, a status hub on the same server takes a snapshot from each watched machine every
+minute and answers `/status`, `/load`, `/deploys` and `/backups` in Telegram, and reports a
+machine that goes silent. The chat round trip and the silence alert were both observed on
+2026-09-23 — with the test server as the only watched machine so far.
+
+## Not verified — no one has done this
 
 **Rollback on a real server.** Automatic rollback has fired on `dev-server` and was watched.
 On production it has never been needed and never been rehearsed.
 
-**Monitoring.** `monitoring/docker-compose.yml` was rehearsed on a laptop. Nothing watches
-either service today; an outage is reported by a person.
+**Production in the status hub.** Production does not report to the hub yet, so `/load` and
+`/backups` for it do not exist.
+
+**A Kuma alert arriving in the chat.** Kuma raised the alert; that the message landed has not
+been confirmed from the chat side.
+
+**Monitoring's own failure.** Kuma and the hub share one server. If it goes down with
+production, nothing says so.
 
 ## Not implemented — the documents say otherwise in places
 
@@ -72,9 +87,12 @@ either service today; an outage is reported by a person.
   still wired up by copying files.
 - **`delivery: static`.** Refused at config load (exit 5) rather than silently accepted.
 - **The Nest adapter and `custom`.** Planned in `docs/multi-stack-plan.md` §7.
-- **A deploy key narrower than root.** The private key is in a repository secret, and the
-  `deploy` user is in the docker group, so anyone who can run a workflow has the equivalent of
-  root on that server.
+- **A deploy key narrower than root, on production.** `server/bootstrap.sh restrict` limits the
+  key to the commands the kit actually sends (`docs/runbooks/deploy-key.md`); it has been
+  applied and exercised on the test server only. On production the key is still unrestricted,
+  and since `deploy` is in the docker group, anyone who can run a workflow there has the
+  equivalent of root. Restricting it needs client repositories pinned to a kit with `scp -O`
+  first.
 
 ## Where to look instead of guessing
 
